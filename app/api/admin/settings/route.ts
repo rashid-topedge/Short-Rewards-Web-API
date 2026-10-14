@@ -1,0 +1,40 @@
+import { NextRequest, NextResponse } from "next/server";
+import { isAuthenticatedAdmin } from "@/lib/auth";
+import { getSystemSettings, updateSystemSettings } from "@/lib/db";
+
+export async function GET(req: NextRequest) {
+  if (!(await isAuthenticatedAdmin(req))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const settings = await getSystemSettings();
+  return NextResponse.json(settings);
+}
+
+export async function PUT(req: NextRequest) {
+  if (!(await isAuthenticatedAdmin(req))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    const body = await req.json();
+    const updated = updateSystemSettings({
+      coinToPkrRate: body.coinToPkrRate !== undefined ? Number(body.coinToPkrRate) : undefined,
+      minRedeemCoins: body.minRedeemCoins !== undefined ? Number(body.minRedeemCoins) : undefined,
+      s3Endpoint: body.s3Endpoint,
+      s3Bucket: body.s3Bucket,
+      s3AccessKey: body.s3AccessKey,
+      s3SecretKey: body.s3SecretKey,
+      s3PublicUrl: body.s3PublicUrl,
+    });
+
+    return NextResponse.json({
+      success: true,
+      message: "System settings updated successfully",
+      settings: updated,
+    });
+  } catch (err: unknown) {
+    console.error("Failed to update settings:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}

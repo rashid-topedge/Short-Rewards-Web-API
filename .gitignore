@@ -32,6 +32,26 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# database / data files
+/data/
+../data/*.db
+
+# migrations / scripts not for production
+migrate*.js
+check-turso-tables.js
+setup-turso-tables.js
+
+# uploads
+public/uploads/
+
+# temp / logs
+logs/
+claude-output/
+
+# test scripts
+test-db.js
 
 # vercel
 .vercel
