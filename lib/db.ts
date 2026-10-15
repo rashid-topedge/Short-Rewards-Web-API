@@ -83,7 +83,7 @@ interface TransactionRow {
   type: string;
   amount: number;
   description: string;
-  created_at: number;
+  created_at: string;
 }
 
 interface RedemptionRow {
@@ -605,15 +605,59 @@ async function formatUserProfile(userRow: UserRow, todayIso: string): Promise<Us
   `,
     [userRow.user_id]
   ).then((txRows: unknown[]) => {
+    // const transactions: CoinTransaction[] = txRows.map(
+    //   (t: Record<string, unknown>) => ({
+    //     id: t.id,
+    //     userId: t.user_id,
+    //     type: t.type as CoinTransaction["type"],
+    //     amount: t.amount,
+    //     description: t.description,
+    //     createdAt: t.created_at,
+    //   })
+    // );
+
     const transactions: CoinTransaction[] = txRows.map(
-      (t: Record<string, unknown>) => ({
-        id: t.id,
-        userId: t.user_id,
-        type: t.type as CoinTransaction["type"],
-        amount: t.amount,
-        description: t.description,
-        createdAt: t.created_at,
-      })
+      (row: unknown) => {
+        if (typeof row !== "object" || row === null) {
+          throw new Error("Invalid coin transaction row");
+        }
+
+        const t = row as Record<string, unknown>;
+
+        if (
+          typeof t.id !== "number" ||
+          typeof t.user_id !== "string" ||
+          typeof t.amount !== "number" ||
+          typeof t.description !== "string" ||
+          typeof t.created_at !== "string" ||
+          typeof t.type !== "string"
+        ) {
+          throw new Error("Invalid coin transaction fields");
+        }
+
+        const validTypes: CoinTransaction["type"][] = [
+          "DAILY_CHECKIN",
+          "EPISODE_WATCHED",
+          "REWARD_AD",
+          "REEL_WATCHED",
+          "SIGNUP_BONUS",
+          "SPEND",
+          "ADMIN_ADJUSTMENT",
+        ];
+
+        if (!validTypes.includes(t.type as CoinTransaction["type"])) {
+          throw new Error("Invalid coin transaction type");
+        }
+
+        return {
+          id: t.id,
+          userId: t.user_id,
+          type: t.type as CoinTransaction["type"],
+          amount: t.amount,
+          description: t.description,
+          createdAt: t.created_at,
+        };
+      }
     );
 
     return {
@@ -919,7 +963,7 @@ export async function createRedemptionRequest(data: {
   // Drop user_episode_rewards table if it exists (badge/back-end episode rewards retired)
   try {
     await db.run(`DROP TABLE IF EXISTS user_episode_rewards;`);
-  } catch {}
+  } catch { }
 
   const row = await db.get(
     "SELECT * FROM redemption_requests ORDER BY id DESC LIMIT 1"
@@ -1530,6 +1574,7 @@ export async function listReelsAdmin(options: {
   };
 }
 
+
 export async function createReelAdmin(data: {
   title: string;
   synopsis?: string;
@@ -1548,21 +1593,21 @@ export async function createReelAdmin(data: {
 
   await db.run(
     `
-    INSERT INTO reels (
-      title, synopsis, video_url, thumbnail_url, duration_seconds,
-      drama_id, episode_number, tags_json, view_count, like_count,
-      is_published, created_at, updated_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
-  `,
+      INSERT INTO reels (
+        title, synopsis, video_url, thumbnail_url, duration_seconds,
+        drama_id, episode_number, tags_json, view_count, like_count,
+        is_published, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+    `,
     [
       data.title.trim(),
       data.synopsis?.trim() || null,
       data.videoUrl.trim(),
       data.thumbnailUrl?.trim() || null,
-      data.durationSeconds || 0,
-      data.dramaId || null,
-      data.episodeNumber || null,
+      data.durationSeconds ?? 0,
+      data.dramaId ?? null,
+      data.episodeNumber ?? null,
       tagsJson,
       pubVal,
       now,
@@ -1573,9 +1618,20 @@ export async function createReelAdmin(data: {
   const row = (await db.get(
     "SELECT * FROM reels ORDER BY reel_id DESC LIMIT 1"
   )) as ReelRow | null;
-  if (!row) throw new Error("No reel found");
-  return getReel(row.reel_id, true);
+
+  if (!row) {
+    throw new Error("Reel created, but could not retrieve its record");
+  }
+
+  const reel = await getReel(row.reel_id, true);
+
+  if (!reel) {
+    throw new Error("Reel created, but could not load its details");
+  }
+
+  return reel;
 }
+
 
 export async function updateReelAdmin(
   reelId: number,
@@ -1657,22 +1713,27 @@ export async function deleteReelAdmin(reelId: number): Promise<boolean> {
   return true;
 }
 
+
 export async function bulkUpdateReelsPublish(
   reelIds: number[],
   isPublished: boolean
 ): Promise<number> {
-  if (!reelIds || reelIds.length === 0) return 0;
+  if (reelIds.length === 0) return 0;
+
   const db = await getDb();
   const placeholders = reelIds.map(() => "?").join(",");
   const pubVal = isPublished ? 1 : 0;
+
   await db.run(
-    `UPDATE reels SET is_published = ?, updated_at = ? WHERE reel_id IN (${placeholders})`,
-    pubVal,
-    Date.now(),
-    ...reelIds
+    `UPDATE reels
+     SET is_published = ?, updated_at = ?
+     WHERE reel_id IN (${placeholders})`,
+    [pubVal, Date.now(), ...reelIds]
   );
+
   return reelIds.length;
 }
+
 
 // ==========================================
 // USER ADMIN QUERIES
@@ -1697,7 +1758,7 @@ export async function listUsersAdmin(options: {
     params.push(`%${query}%`);
   }
 
-  const countRow = (await db.get(`SELECT COUNT(*) as count FROM users ${whereClause}`, params)) as {
+  const countRow = (await db.get(`SELECT COUNT(*) as count FROM users ${whereClause}`, params as InValue[])) as {
     count: number;
   };
   const total = countRow.count;
@@ -1709,7 +1770,7 @@ export async function listUsersAdmin(options: {
     LIMIT ? OFFSET ?
   `;
 
-  const rows = await db.all(sql, params.concat([limit, offset])) as UserRow[];
+  const rows = await db.all(sql, params.concat([limit, offset]) as InValue[]) as UserRow[];
 
   return {
     total,
@@ -1788,7 +1849,7 @@ export async function listTransactionsAdmin(options: {
 
   const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
-  const countRow = (await db.get(`SELECT COUNT(*) as count FROM coin_transactions ${whereSql}`, params)) as {
+  const countRow = (await db.get(`SELECT COUNT(*) as count FROM coin_transactions ${whereSql}`, params as InValue[])) as {
     count: number;
   };
   const total = countRow.count;
@@ -1801,7 +1862,7 @@ export async function listTransactionsAdmin(options: {
     LIMIT ? OFFSET ?
   `;
 
-  const rows = await db.all(sql, params.concat([limit, offset])) as TransactionRow[];
+  const rows = await db.all(sql, params.concat([limit, offset]) as InValue[]) as TransactionRow[];
 
   return {
     total,
