@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "coinsAmount must be a positive number" }, { status: 400 });
     }
 
-    const result = createRedemptionRequest({
+    const result = await createRedemptionRequest({
       userId,
       coinsAmount,
       paymentMethod,

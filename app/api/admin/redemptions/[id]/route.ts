@@ -23,7 +23,7 @@ export async function POST(
       return NextResponse.json({ error: "Action must be PAID or REJECTED" }, { status: 400 });
     }
 
-    const result = processRedemptionAdmin(redemptionId, {
+    const result = await processRedemptionAdmin(redemptionId, {
       action,
       transactionRef: body?.transactionRef,
       receiptUrl: body?.receiptUrl,

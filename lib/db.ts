@@ -148,7 +148,7 @@ async function getDb(): Promise<DbApi> {
       lastInsertRowid: number | bigint;
     }> {
       const result = await client.execute({ sql, args: args || [] });
-      return { changes: result.rowsAffected, lastInsertRowid: result.lastInsertRowid };
+      return { changes: result.rowsAffected, lastInsertRowid: result.lastInsertRowid ?? 0 };
     },
   };
 
@@ -237,7 +237,7 @@ function parseTags(raw: string | null): string[] {
   try {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed)
-      ? parsed.map((item) => String(item).trim()).filter(Boolean)
+      ? (parsed as unknown[]).map((item) => String(item).trim()).filter(Boolean)
       : [];
   } catch {
     return [];
@@ -490,7 +490,7 @@ export async function listReels(options?: {
   sql += ` LIMIT ?`;
   params.push(limit + 1);
 
-  const rows = (await db.all(sql, params)) as ReelRow[];
+  const rows = (await db.all(sql, params as InValue[])) as ReelRow[];
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
   const nextCursor = hasMore ? String(items[items.length - 1].reel_id) : null;
@@ -604,9 +604,9 @@ async function formatUserProfile(userRow: UserRow, todayIso: string): Promise<Us
     LIMIT 30
   `,
     [userRow.user_id]
-  ).then((txRows) => {
+  ).then((txRows: unknown[]) => {
     const transactions: CoinTransaction[] = txRows.map(
-      (t) => ({
+      (t: Record<string, unknown>) => ({
         id: t.id,
         userId: t.user_id,
         type: t.type as CoinTransaction["type"],
@@ -975,7 +975,7 @@ export async function listRedemptionsAdmin(options: {
 
   const countRow = (await db.get(
     `SELECT COUNT(*) as count FROM redemption_requests ${whereSql}`,
-    params
+    params as InValue[]
   )) as { count: number };
   const total = countRow.count;
 
@@ -986,7 +986,7 @@ export async function listRedemptionsAdmin(options: {
     LIMIT ? OFFSET ?
   `;
 
-  const rows = await db.all(sql, params.concat([limit, offset])) as RedemptionRow[];
+  const rows = await db.all(sql, params.concat([limit, offset]) as InValue[]) as RedemptionRow[];
 
   return {
     total,
@@ -1214,7 +1214,7 @@ export async function listDramasAdmin(options: {
 
   const countRow = (await db.get(
     `SELECT COUNT(*) as count FROM dramas ${whereSql}`,
-    params
+    params as InValue[]
   )) as { count: number };
   const total = countRow.count;
 
@@ -1226,7 +1226,7 @@ export async function listDramasAdmin(options: {
     LIMIT ? OFFSET ?
   `;
 
-  const rows = await db.all(sql, params.concat([limit, offset])) as DramaListRow[];
+  const rows = await db.all(sql, params.concat([limit, offset]) as InValue[]) as DramaListRow[];
 
   return {
     total,
@@ -1345,7 +1345,7 @@ export async function updateDramaAdmin(
   }
 
   params.push(dramaId);
-  await db.run(`UPDATE dramas SET ${updates.join(", ")} WHERE drama_id = ?`, params);
+  await db.run(`UPDATE dramas SET ${updates.join(", ")} WHERE drama_id = ?`, params as InValue[]);
 
   return getDrama(dramaId, true);
 }
@@ -1368,12 +1368,11 @@ export async function bulkUpdateDramasPublish(
   const pubVal = isPublished ? 1 : 0;
   await db.run(
     `UPDATE dramas SET is_published = ?, updated_at = datetime('now') WHERE drama_id IN (${placeholders})`,
-    pubVal,
-    ...dramaIds
+    [pubVal, ...dramaIds] as InValue[]
   );
   await db.run(
     `UPDATE episodes SET is_published = ? WHERE drama_id IN (${placeholders})`,
-    ...dramaIds
+    [pubVal, ...dramaIds] as InValue[]
   );
   return dramaIds.length;
 }
@@ -1388,8 +1387,8 @@ export async function bulkUpdateAllDramasPublish(
   if (onlyWithEpisodes) {
     sql += ` WHERE episode_count > 0 OR drama_id IN (SELECT DISTINCT drama_id FROM episodes WHERE url IS NOT NULL AND url != '')`;
   }
-  await db.run(sql, pubVal);
-  await db.run(`UPDATE episodes SET is_published = ?`, pubVal);
+  await db.run(sql, [pubVal] as InValue[]);
+  await db.run(`UPDATE episodes SET is_published = ?`, [pubVal] as InValue[]);
   return 1;
 }
 
@@ -1507,7 +1506,7 @@ export async function listReelsAdmin(options: {
     FROM reels r
     LEFT JOIN dramas d ON r.drama_id = d.drama_id
     ${whereSql}
-  `, params)) as { count: number };
+  `, params as InValue[])) as { count: number };
   const total = countRow.count;
 
   const sql = `
@@ -1521,7 +1520,7 @@ export async function listReelsAdmin(options: {
     LIMIT ? OFFSET ?
   `;
 
-  const rows = await db.all(sql, params.concat([limit, offset])) as ReelRow[];
+  const rows = await db.all(sql, params.concat([limit, offset]) as InValue[]) as ReelRow[];
 
   return {
     total,
@@ -1573,7 +1572,8 @@ export async function createReelAdmin(data: {
 
   const row = (await db.get(
     "SELECT * FROM reels ORDER BY reel_id DESC LIMIT 1"
-  )) as ReelRow;
+  )) as ReelRow | null;
+  if (!row) throw new Error("No reel found");
   return getReel(row.reel_id, true);
 }
 
@@ -1646,7 +1646,7 @@ export async function updateReelAdmin(
   }
 
   params.push(reelId);
-  await db.run(`UPDATE reels SET ${updates.join(", ")} WHERE reel_id = ?`, params);
+  await db.run(`UPDATE reels SET ${updates.join(", ")} WHERE reel_id = ?`, params as InValue[]);
 
   return getReel(reelId, true);
 }
