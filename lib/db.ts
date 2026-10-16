@@ -226,7 +226,16 @@ async function createSchema(): Promise<void> {
     `CREATE INDEX IF NOT EXISTS idx_reels_drama ON reels (drama_id)`,
     `CREATE INDEX IF NOT EXISTS idx_redemptions_status ON redemption_requests(status, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_redemptions_user ON redemption_requests(user_id, created_at DESC)`,
-  ];
+    // Migration for B2 URL columns and settings
+    `ALTER TABLE dramas ADD COLUMN cover_url_b2 TEXT`,
+    `ALTER TABLE episodes ADD COLUMN url_b2 TEXT`,
+    `ALTER TABLE reels ADD COLUMN video_url_b2 TEXT`,
+    `ALTER TABLE redemption_requests ADD COLUMN receipt_url_b2 TEXT`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_key_id', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_application_key', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_bucket_name', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_endpoint', 's3.us-west-004.backblazeb2.com', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_public_url', '', 0)`,
 
   for (const sql of statements) {
     try {

@@ -55,6 +55,8 @@ export default function AdminReelsPage() {
     isPublished: false,
   });
   const [submittingReel, setSubmittingReel] = useState(false);
+  const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
+  const [uploadingFolder, setUploadingFolder] = useState(false);
 
   const fetchReels = useCallback(async () => {
     setLoading(true);
@@ -526,15 +528,50 @@ export default function AdminReelsPage() {
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-300">Video Stream URL (.m3u8 / .mp4)</label>
-                <input
-                  type="url"
-                  required
-                  value={reelForm.videoUrl}
-                  onChange={(e) => setReelForm({ ...reelForm, videoUrl: e.target.value })}
-                  placeholder="https://stream.example.com/reels/clip1.m3u8"
-                  className="w-full bg-[#161c28] border border-[#222c3f] rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-purple-500"
-                />
+                <label className="text-xs font-semibold text-neutral-300">Video Stream URL (.m3u8 / .mp4) or Folder Upload</label>
+                <div className="flex gap-2">
+                  <input
+                    type="url"
+                    value={reelForm.videoUrl}
+                    onChange={(e) => setReelForm({ ...reelForm, videoUrl: e.target.value })}
+                    placeholder="https://stream.example.com/reels/clip1.m3u8"
+                    className="flex-1 bg-[#161c28] border border-[#222c3f] rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-purple-500"
+                  />
+                  <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#222c3f] hover:bg-[#2e3b52] text-white text-xs font-semibold transition whitespace-nowrap">
+                    <span>{uploadingFolder ? "Uploading..." : "Select Folder"}</span>
+                    <input
+                      type="file"
+                      // @ts-expect-error webkitdirectory
+                      webkitdirectory=""
+                      directory=""
+                      multiple
+                      className="hidden"
+                      onChange={async (e) => {
+                        const files = e.target.files;
+                        if (!files || files.length === 0) return;
+                        setUploadingFolder(true);
+                        try {
+                          const formData = new FormData();
+                          formData.append("folderType", "reels");
+                          const slug = reelForm.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `reel_${Date.now()}`;
+                          formData.append("targetName", slug);
+                          for (let i = 0; i < files.length; i++) formData.append("files", files[i]);
+                          const res = await fetch("/api/admin/upload-folder", { method: "POST", body: formData });
+                          if (res.ok) {
+                            const data = await res.json();
+                            const videoEntry = Object.entries(data.urls || {}).find(([k]) => /\.(mp4|m3u8|webm|mov)$/i.test(k));
+                            const thumbEntry = Object.entries(data.urls || {}).find(([k]) => /\.(jpg|jpeg|png|webp)$/i.test(k));
+                            const updates: Partial<typeof reelForm> = {};
+                            if (videoEntry) updates.videoUrl = videoEntry[1];
+                            if (thumbEntry) updates.thumbnailUrl = thumbEntry[1];
+                            if (Object.keys(updates).length > 0) setReelForm(prev => ({ ...prev, ...updates }));
+                          }
+                        } catch (err) { console.error("Reel folder upload error", err); }
+                        finally { setUploadingFolder(false); }
+                      }}
+                    />
+                  </label>
+                </div>
               </div>
 
               <div className="space-y-1.5">
