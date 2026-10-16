@@ -71,7 +71,7 @@ export type CoinTransaction = {
   type: "DAILY_CHECKIN" | "EPISODE_WATCHED" | "REWARD_AD" | "REEL_WATCHED" | "SIGNUP_BONUS" | "SPEND" | "ADMIN_ADJUSTMENT";
   amount: number;
   description: string;
-  createdAt: string;
+  createdAt: number;
 };
 
 export type StreakDayInfo = {

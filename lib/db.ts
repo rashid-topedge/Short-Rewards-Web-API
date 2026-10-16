@@ -83,7 +83,7 @@ interface TransactionRow {
   type: string;
   amount: number;
   description: string;
-  created_at: string;
+  created_at: number;
 }
 
 interface RedemptionRow {
@@ -629,7 +629,7 @@ async function formatUserProfile(userRow: UserRow, todayIso: string): Promise<Us
           typeof t.user_id !== "string" ||
           typeof t.amount !== "number" ||
           typeof t.description !== "string" ||
-          typeof t.created_at !== "string" ||
+          typeof t.created_at !== "number" ||
           typeof t.type !== "string"
         ) {
           throw new Error("Invalid coin transaction fields");
