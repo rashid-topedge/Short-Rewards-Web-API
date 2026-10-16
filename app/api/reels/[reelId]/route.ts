@@ -11,12 +11,12 @@ export async function GET(
     return NextResponse.json({ error: "Invalid reel ID" }, { status: 400 });
   }
 
-  const reel = getReel(id);
+  const reel = await getReel(id);
   if (!reel) {
     return NextResponse.json({ error: "Reel not found" }, { status: 404 });
   }
 
-  incrementReelViews(id);
+  await incrementReelViews(id);
 
   return NextResponse.json(reel);
 }
@@ -34,7 +34,7 @@ export async function POST(
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.action === "like") {
-      incrementReelLikes(id);
+      await incrementReelLikes(id);
       return NextResponse.json({ success: true, message: "Reel liked" });
     }
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
