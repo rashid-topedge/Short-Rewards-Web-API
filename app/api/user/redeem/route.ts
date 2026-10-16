@@ -11,7 +11,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "userId is required" }, { status: 400 });
   }
 
-  const redemptions = listUserRedemptions(userId);
+  const redemptions = await listUserRedemptions(userId);
   return NextResponse.json({ items: redemptions });
 }
 
