@@ -548,8 +548,38 @@ export default function AdminPayoutsPage() {
                   />
                   <label className="px-3 py-2 rounded-xl bg-[#222c3f] hover:bg-[#2d3a54] text-white text-xs font-semibold cursor-pointer flex items-center gap-1.5 transition">
                     <Upload className="w-3.5 h-3.5" />
-                    <span>Upload</span>
-                    <input type="file" accept="image/*" onChange={handleReceiptUpload} className="hidden" />
+                    <span>Folder</span>
+                    <input type="file" // @ts-expect-error webkitdirectory
+                      webkitdirectory="" directory="" multiple
+                      className="hidden"
+                      onChange={async (e) => {
+                        const files = e.target.files;
+                        if (!files || files.length === 0) return;
+                        setUploadingReceipt(true);
+                        setProcessError("");
+                        try {
+                          const formData = new FormData();
+                          const targetName = (currentRequest?.requestId || `payout_${Date.now()}`).toString().replace(/[^a-z0-9_-]/gi, "_");
+                          formData.append("folderType", "payouts");
+                          formData.append("targetName", targetName);
+                          for (let i = 0; i < files.length; i++) formData.append("files", files[i]);
+                          const res = await fetch("/api/admin/upload-folder", { method: "POST", body: formData });
+                          if (res.ok) {
+                            const data = await res.json();
+                            const receiptFile = Object.entries(data.urls || {}).find(([k]) => /\.(jpg|jpeg|png|webp|pdf)$/i.test(k));
+                            if (receiptFile) setReceiptUrl(receiptFile[1]);
+                            else setReceiptUrl(Object.values(data.urls || {})[0] || "");
+                          } else {
+                            setProcessError("Upload failed");
+                          }
+                        } catch (err) {
+                          console.error("Folder upload error", err);
+                          setProcessError("Upload error");
+                        } finally {
+                          setUploadingReceipt(false);
+                        }
+                      }}
+                    />
                   </label>
                 </div>
                 {uploadingReceipt && (
