@@ -159,17 +159,18 @@ async function getDb(): Promise<DbApi> {
 }
 
 async function createSchema(): Promise<void> {
-  await dbFacade?.run(`
-    CREATE TABLE IF NOT EXISTS users (
+  // Turso/libsql does NOT allow multiple SQL statements in a single execute() call.
+  // Each statement must be sent separately.
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS users (
       user_id TEXT PRIMARY KEY,
       coins INTEGER NOT NULL DEFAULT 50,
       streak_day INTEGER NOT NULL DEFAULT 0,
       last_check_in_date TEXT,
       created_at REAL NOT NULL,
       updated_at REAL NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS coin_transactions (
+    )`,
+    `CREATE TABLE IF NOT EXISTS coin_transactions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
       type TEXT NOT NULL,
@@ -177,9 +178,8 @@ async function createSchema(): Promise<void> {
       description TEXT NOT NULL,
       created_at REAL NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS reels (
+    )`,
+    `CREATE TABLE IF NOT EXISTS reels (
       reel_id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
       synopsis TEXT,
@@ -195,9 +195,8 @@ async function createSchema(): Promise<void> {
       created_at REAL NOT NULL,
       updated_at REAL NOT NULL,
       FOREIGN KEY (drama_id) REFERENCES dramas(drama_id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS redemption_requests (
+    )`,
+    `CREATE TABLE IF NOT EXISTS redemption_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
       coins_amount INTEGER NOT NULL,
@@ -214,22 +213,32 @@ async function createSchema(): Promise<void> {
       created_at REAL NOT NULL,
       processed_at REAL,
       FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS system_settings (
+    )`,
+    `CREATE TABLE IF NOT EXISTS system_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
       updated_at REAL NOT NULL
-    );
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_coin_transactions_user ON coin_transactions(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_dramas_published ON dramas (is_published, drama_id DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_episodes_published ON episodes (drama_id, is_published, ep ASC)`,
+    `CREATE INDEX IF NOT EXISTS idx_reels_published ON reels (is_published, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_reels_drama ON reels (drama_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_redemptions_status ON redemption_requests(status, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_redemptions_user ON redemption_requests(user_id, created_at DESC)`,
+  ];
 
-    CREATE INDEX IF NOT EXISTS idx_coin_transactions_user ON coin_transactions(user_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_dramas_published ON dramas (is_published, drama_id DESC);
-    CREATE INDEX IF NOT EXISTS idx_episodes_published ON episodes (drama_id, is_published, ep ASC);
-    CREATE INDEX IF NOT EXISTS idx_reels_published ON reels (is_published, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_reels_drama ON reels (drama_id);
-    CREATE INDEX IF NOT EXISTS idx_redemptions_status ON redemption_requests(status, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_redemptions_user ON redemption_requests(user_id, created_at DESC);
-  `);
+  for (const sql of statements) {
+    try {
+      await dbFacade?.run(sql);
+    } catch (err) {
+      // Indexes/tables may already exist; ignore duplicate errors but surface others.
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/already exists|duplicate/i.test(message)) {
+        throw err;
+      }
+    }
+  }
 }
 
 function parseTags(raw: string | null): string[] {
