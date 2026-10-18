@@ -19,10 +19,31 @@ export async function POST(req: NextRequest) {
     }
 
     const settings = await getSystemSettings();
-    const keyId = settings.s3AccessKey || process.env.B2_KEY_ID;
-    const applicationKey = settings.s3SecretKey || process.env.B2_APPLICATION_KEY;
-    const bucketId = settings.s3Bucket || process.env.B2_BUCKET_ID;
-    const endpoint = settings.s3Endpoint || process.env.B2_ENDPOINT || "s3.us-west-004.backblazeb2.com";
+
+    // Multi-account resolution: support per-folder account keys or fall back to global/env
+    // e.g. B2 accounts mapping: dramas, reels, payouts
+    let keyId = settings.s3AccessKey || process.env.B2_KEY_ID;
+    let applicationKey = settings.s3SecretKey || process.env.B2_APPLICATION_KEY;
+    let bucketId = settings.s3Bucket || process.env.B2_BUCKET_ID;
+    let endpoint = settings.s3Endpoint || process.env.B2_ENDPOINT || "s3.us-west-004.backblazeb2.com";
+    let publicUrlBase = settings.s3PublicUrl || "";
+
+    if (folderType === "dramas") {
+      keyId = settings[`b2_dramas_key_id`] || keyId;
+      applicationKey = settings[`b2_dramas_app_key`] || applicationKey;
+      bucketId = settings[`b2_dramas_bucket_id`] || bucketId;
+      publicUrlBase = settings[`b2_dramas_public_url`] || publicUrlBase;
+    } else if (folderType === "reels") {
+      keyId = settings[`b2_reels_key_id`] || keyId;
+      applicationKey = settings[`b2_reels_app_key`] || applicationKey;
+      bucketId = settings[`b2_reels_bucket_id`] || bucketId;
+      publicUrlBase = settings[`b2_reels_public_url`] || publicUrlBase;
+    } else if (folderType === "payouts") {
+      keyId = settings[`b2_payouts_key_id`] || keyId;
+      applicationKey = settings[`b2_payouts_app_key`] || applicationKey;
+      bucketId = settings[`b2_payouts_bucket_id`] || bucketId;
+      publicUrlBase = settings[`b2_payouts_public_url`] || publicUrlBase;
+    }
 
     const uploadedUrls: Record<string, string> = {};
 
@@ -35,7 +56,6 @@ export async function POST(req: NextRequest) {
 
         await b2.authorize();
 
-        // Get upload URL
         const uploadUrlResponse = await b2.getUploadUrl({
           bucketId: bucketId,
         });
@@ -48,7 +68,7 @@ export async function POST(req: NextRequest) {
           const sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
           const b2FileName = `${folderType}/${targetName}/${sanitizedFilename}`;
 
-          const uploadResponse = await b2.uploadFile({
+          await b2.uploadFile({
             uploadUrl,
             uploadAuthToken: authorizationToken,
             fileName: b2FileName,
@@ -56,9 +76,8 @@ export async function POST(req: NextRequest) {
             mime: file.type || "application/octet-stream",
           });
 
-          const fileId = uploadResponse.data.fileId;
-          const publicUrl = settings.s3PublicUrl
-            ? `${settings.s3PublicUrl.replace(/\/$/, "")}/${b2FileName}`
+          const publicUrl = publicUrlBase
+            ? `${publicUrlBase.replace(/\/$/, "")}/${b2FileName}`
             : `https://${endpoint}/file/${bucketId}/${b2FileName}`;
 
           uploadedUrls[file.name] = publicUrl;
@@ -67,10 +86,10 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({
           success: true,
           urls: uploadedUrls,
-          message: `Successfully uploaded ${files.length} files to Backblaze B2 folder: ${folderType}/${targetName}`,
+          message: `Successfully uploaded ${files.length} files to B2 account (${folderType})`,
         });
       } catch (b2Err: unknown) {
-        console.error("Backblaze B2 SDK error, falling back to local storage:", b2Err);
+        console.error(`B2 multi-account error for ${folderType}, falling back to local:`, b2Err);
       }
     }
 
@@ -95,7 +114,7 @@ export async function POST(req: NextRequest) {
       message: `Successfully saved ${files.length} files locally under folder: ${folderType}/${targetName}`,
     });
   } catch (err: unknown) {
-    console.error("Folder upload failed:", err);
-    return NextResponse.json({ error: "Failed to process folder upload to Backblaze B2" }, { status: 500 });
+    console.error("Multi-account folder upload failed:", err);
+    return NextResponse.json({ error: "Failed to process folder upload" }, { status: 500 });
   }
 }

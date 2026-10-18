@@ -236,6 +236,19 @@ async function createSchema(): Promise<void> {
     `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_bucket_name', '', 0)`,
     `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_endpoint', 's3.us-west-004.backblazeb2.com', 0)`,
     `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_public_url', '', 0)`,
+    // Multi-account B2 config (one account per folder type: dramas / reels / payouts)
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_dramas_key_id', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_dramas_app_key', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_dramas_bucket_id', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_dramas_public_url', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_reels_key_id', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_reels_app_key', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_reels_bucket_id', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_reels_public_url', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_payouts_key_id', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_payouts_app_key', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_payouts_bucket_id', '', 0)`,
+    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_payouts_public_url', '', 0)`,
 
   for (const sql of statements) {
     try {
