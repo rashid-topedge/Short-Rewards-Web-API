@@ -238,7 +238,7 @@ export async function buildAuthorizedPublicUrl(config: B2Config, b2FileName: str
   const url = buildPublicUrl(config, b2FileName, downloadUrl, bucketName);
   try {
     const { client } = await getB2Client(config.keyId, config.applicationKey);
-    const authRes = await client.getDownloadAuthorization({
+    const authRes = await (client as any).getDownloadAuthorization({
       bucketId: config.bucketId,
       fileNamePrefix: b2FileName,
       validDurationInSeconds: 604800,
@@ -306,7 +306,7 @@ export async function uploadBufferToB2(options: {
       mime: mimeType || "application/octet-stream",
     });
 
-    const publicUrl = buildPublicUrl(config, b2FileName, downloadUrl, bucketName);
+    const publicUrl = buildPublicUrl(config, b2FileName, downloadUrl, bucketName || undefined);
     return {
       url: publicUrl,
       fileId: res.data.fileId,
@@ -353,7 +353,7 @@ export async function uploadBufferToB2(options: {
       partSha1Array,
     });
 
-    const publicUrl = buildPublicUrl(config, b2FileName, downloadUrl, bucketName);
+    const publicUrl = buildPublicUrl(config, b2FileName, downloadUrl, bucketName || undefined);
     return {
       url: publicUrl,
       fileId,
