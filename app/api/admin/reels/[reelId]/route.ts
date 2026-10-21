@@ -12,7 +12,7 @@ export async function GET(
 
   const { reelId } = await params;
   const id = parseInt(reelId, 10);
-  const reel = getReel(id, true);
+  const reel = await getReel(id, true);
   if (!reel) {
     return NextResponse.json({ error: "Reel not found" }, { status: 404 });
   }
@@ -38,7 +38,7 @@ export async function PUT(
       ? body.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
       : undefined;
 
-    const reel = updateReelAdmin(id, {
+    const reel = await updateReelAdmin(id, {
       title: body.title,
       synopsis: body.synopsis,
       videoUrl: body.videoUrl,
@@ -72,6 +72,6 @@ export async function DELETE(
 
   const { reelId } = await params;
   const id = parseInt(reelId, 10);
-  deleteReelAdmin(id);
+  await deleteReelAdmin(id);
   return NextResponse.json({ success: true, message: "Reel deleted successfully" });
 }

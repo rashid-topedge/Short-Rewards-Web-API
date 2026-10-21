@@ -137,6 +137,20 @@ export type SystemSettings = {
   s3AccessKey: string;
   s3SecretKey: string;
   s3PublicUrl: string;
+
+  // Multi-account B2 config (optional per-folder overrides)
+  b2DramasKeyId?: string;
+  b2DramasAppKey?: string;
+  b2DramasBucketId?: string;
+  b2DramasPublicUrl?: string;
+  b2ReelsKeyId?: string;
+  b2ReelsAppKey?: string;
+  b2ReelsBucketId?: string;
+  b2ReelsPublicUrl?: string;
+  b2PayoutsKeyId?: string;
+  b2PayoutsAppKey?: string;
+  b2PayoutsBucketId?: string;
+  b2PayoutsPublicUrl?: string;
 };
 
 export type AdminDashboardStats = {

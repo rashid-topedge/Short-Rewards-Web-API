@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listReels } from "@/lib/db";
+import { getB2ConfigForFolder, buildAuthorizedPublicUrl, getB2Client, resolveBucketName } from "@/lib/b2";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -16,6 +17,37 @@ export async function GET(req: NextRequest) {
     dramaId: isNaN(dramaId as number) ? undefined : dramaId,
     sort,
   });
+
+  try {
+    const b2Config = await getB2ConfigForFolder("reels");
+    if (b2Config) {
+      const { client, downloadUrl } = await getB2Client(b2Config.keyId, b2Config.applicationKey);
+      const bucketName = await resolveBucketName(client, b2Config.bucketId);
+
+      const items = await Promise.all(
+        data.items.map(async (reel) => {
+          if (!reel.videoUrl) return reel;
+          let publicVideoUrl = reel.videoUrl;
+          try {
+            const fileNameMatch = reel.videoUrl.match(/\/file\/[^/]+\/(.+)/);
+            if (fileNameMatch) {
+              publicVideoUrl = await buildAuthorizedPublicUrl(b2Config, fileNameMatch[1], downloadUrl, bucketName || undefined);
+            } else if (reel.videoUrl.startsWith("http")) {
+              const f = reel.videoUrl.replace(/.*\/file\/[^/]+\//, "");
+              publicVideoUrl = await buildAuthorizedPublicUrl(b2Config, f, downloadUrl, bucketName || undefined);
+            }
+          } catch {
+            // keep original
+          }
+          return { ...reel, videoUrl: publicVideoUrl };
+        })
+      );
+
+      return NextResponse.json({ ...data, items });
+    }
+  } catch {
+    // ignore B2 auth/resolution failure, return original data
+  }
 
   return NextResponse.json(data);
 }

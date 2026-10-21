@@ -21,7 +21,9 @@ import {
   Clock,
   Heart,
   Eye,
+  UploadCloud,
 } from "lucide-react";
+import FileUploadManager from "@/components/admin/FileUploadManager";
 import type { ReelItem } from "@/lib/types";
 
 export default function AdminReelsPage() {
@@ -57,6 +59,7 @@ export default function AdminReelsPage() {
   const [submittingReel, setSubmittingReel] = useState(false);
   const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
   const [uploadingFolder, setUploadingFolder] = useState(false);
+  const [showReelUploader, setShowReelUploader] = useState(false);
 
   const fetchReels = useCallback(async () => {
     setLoading(true);
@@ -527,51 +530,54 @@ export default function AdminReelsPage() {
                 />
               </div>
 
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-300">Video Stream URL (.m3u8 / .mp4) or Folder Upload</label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-neutral-300">Video Stream URL (.m3u8 / .mp4)</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowReelUploader(!showReelUploader)}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-purple-400 hover:text-purple-300 transition"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    {showReelUploader ? "Hide Uploader" : "B2 Cloud Uploader (Progress & Resumable)"}
+                  </button>
+                </div>
+
                 <div className="flex gap-2">
                   <input
                     type="url"
                     value={reelForm.videoUrl}
                     onChange={(e) => setReelForm({ ...reelForm, videoUrl: e.target.value })}
-                    placeholder="https://stream.example.com/reels/clip1.m3u8"
+                    placeholder="https://stream.example.com/reels/clip1.m3u8 or upload video"
                     className="flex-1 bg-[#161c28] border border-[#222c3f] rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-purple-500"
                   />
-                  <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#222c3f] hover:bg-[#2e3b52] text-white text-xs font-semibold transition whitespace-nowrap">
-                    <span>{uploadingFolder ? "Uploading..." : "Select Folder"}</span>
-                    <input
-                      type="file"
-                      // @ts-expect-error webkitdirectory
-                      webkitdirectory=""
-                      directory=""
-                      multiple
-                      className="hidden"
-                      onChange={async (e) => {
-                        const files = e.target.files;
-                        if (!files || files.length === 0) return;
-                        setUploadingFolder(true);
-                        try {
-                          const formData = new FormData();
-                          formData.append("folderType", "reels");
-                          const slug = reelForm.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `reel_${Date.now()}`;
-                          formData.append("targetName", slug);
-                          for (let i = 0; i < files.length; i++) formData.append("files", files[i]);
-                          const res = await fetch("/api/admin/upload-folder", { method: "POST", body: formData });
-                          if (res.ok) {
-                            const data = await res.json();
-                            const videoEntry = Object.entries(data.urls || {}).find(([k]) => /\.(mp4|m3u8|webm|mov)$/i.test(k));
-                            const thumbEntry = Object.entries(data.urls || {}).find(([k]) => /\.(jpg|jpeg|png|webp)$/i.test(k));
-                            const updates: Partial<typeof reelForm> = {};
-                            if (videoEntry) updates.videoUrl = videoEntry[1];
-                            if (thumbEntry) updates.thumbnailUrl = thumbEntry[1];
-                            if (Object.keys(updates).length > 0) setReelForm(prev => ({ ...prev, ...updates }));
-                          }
-                        } catch (err) { console.error("Reel folder upload error", err); }
-                        finally { setUploadingFolder(false); }
+                  <button
+                    type="button"
+                    onClick={() => setShowReelUploader(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#222c3f] hover:bg-[#2e3b52] text-white text-xs font-semibold transition whitespace-nowrap"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5 text-purple-400" /> Upload File / Folder
+                  </button>
+                </div>
+
+                {showReelUploader && (
+                  <div className="p-3.5 rounded-2xl bg-[#0f1422] border border-[#1f2a40] space-y-3">
+                    <FileUploadManager
+                      folderType="reels"
+                      targetName={reelForm.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `reel_${Date.now()}`}
+                      compact={true}
+                      onFileUploaded={(result) => {
+                        const isVideo = /\.(mp4|m3u8|webm|mov|mkv)$/i.test(result.fileName) || result.file.type.startsWith("video/");
+                        const isImage = /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(result.fileName) || result.file.type.startsWith("image/");
+                        setReelForm((prev) => ({
+                          ...prev,
+                          ...(isVideo ? { videoUrl: result.url } : {}),
+                          ...(isImage ? { thumbnailUrl: result.url } : {}),
+                        }));
                       }}
                     />
-                  </label>
-                </div>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-1.5">

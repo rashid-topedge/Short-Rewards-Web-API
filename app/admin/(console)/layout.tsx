@@ -14,6 +14,7 @@ import {
   ExternalLink,
   ShieldCheck,
   Flame,
+  CloudCog,
 } from "lucide-react";
 
 export default async function AdminLayout({
@@ -35,6 +36,7 @@ export default async function AdminLayout({
     { label: "Payouts & Redemptions", href: "/admin/payouts", icon: CreditCard },
     { label: "Users & Economy", href: "/admin/users", icon: Users },
     { label: "Transactions", href: "/admin/transactions", icon: Coins },
+    { label: "Storage & B2 Keys", href: "/admin/settings", icon: CloudCog },
   ];
 
   return (

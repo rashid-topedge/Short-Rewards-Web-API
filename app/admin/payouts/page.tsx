@@ -17,7 +17,9 @@ import {
   DollarSign,
   AlertCircle,
   ShieldCheck,
+  UploadCloud,
 } from "lucide-react";
+import FileUploadManager from "@/components/admin/FileUploadManager";
 import type { RedemptionRequest, SystemSettings } from "@/lib/types";
 
 export default function AdminPayoutsPage() {
@@ -48,6 +50,7 @@ export default function AdminPayoutsPage() {
   const [receiptUrl, setReceiptUrl] = useState("");
   const [adminNotes, setAdminNotes] = useState("");
   const [uploadingReceipt, setUploadingReceipt] = useState(false);
+  const [showReceiptUploader, setShowReceiptUploader] = useState(false);
   const [processingAction, setProcessingAction] = useState(false);
   const [processError, setProcessError] = useState("");
 
@@ -532,56 +535,61 @@ export default function AdminPayoutsPage() {
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-white flex items-center justify-between">
-                  <span>Payment Receipt Screenshot (Mandatory for PAID)</span>
-                  <span className="text-[10px] text-neutral-400">Cloudflare R2 / S3 or Image</span>
-                </label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-white">
+                    Payment Receipt Screenshot (Mandatory for PAID)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowReceiptUploader(!showReceiptUploader)}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 transition"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    {showReceiptUploader ? "Hide Uploader" : "B2 Cloud Uploader (Progress & Resumable)"}
+                  </button>
+                </div>
+
                 <div className="flex gap-2">
                   <input
                     type="url"
-                    placeholder="https://... or upload below"
+                    placeholder="https://... or upload receipt"
                     value={receiptUrl}
                     onChange={(e) => setReceiptUrl(e.target.value)}
                     onBlur={handleReceiptUrlSubmit}
                     className="flex-1 bg-[#161c28] border border-[#222c3f] rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
                   />
-                  <label className="px-3 py-2 rounded-xl bg-[#222c3f] hover:bg-[#2d3a54] text-white text-xs font-semibold cursor-pointer flex items-center gap-1.5 transition">
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>Folder</span>
-                    <input type="file" // @ts-expect-error webkitdirectory
-                      webkitdirectory="" directory="" multiple
-                      className="hidden"
-                      onChange={async (e) => {
-                        const files = e.target.files;
-                        if (!files || files.length === 0) return;
-                        setUploadingReceipt(true);
-                        setProcessError("");
-                        try {
-                          const formData = new FormData();
-                          const targetName = (currentRequest?.requestId || `payout_${Date.now()}`).toString().replace(/[^a-z0-9_-]/gi, "_");
-                          formData.append("folderType", "payouts");
-                          formData.append("targetName", targetName);
-                          for (let i = 0; i < files.length; i++) formData.append("files", files[i]);
-                          const res = await fetch("/api/admin/upload-folder", { method: "POST", body: formData });
-                          if (res.ok) {
-                            const data = await res.json();
-                            const receiptFile = Object.entries(data.urls || {}).find(([k]) => /\.(jpg|jpeg|png|webp|pdf)$/i.test(k));
-                            if (receiptFile) setReceiptUrl(receiptFile[1]);
-                            else setReceiptUrl(Object.values(data.urls || {})[0] || "");
-                          } else {
-                            setProcessError("Upload failed");
-                          }
-                        } catch (err) {
-                          console.error("Folder upload error", err);
-                          setProcessError("Upload error");
-                        } finally {
-                          setUploadingReceipt(false);
+                  <button
+                    type="button"
+                    onClick={() => setShowReceiptUploader(true)}
+                    className="px-3 py-2 rounded-xl bg-[#222c3f] hover:bg-[#2d3a54] text-white text-xs font-semibold flex items-center gap-1.5 transition whitespace-nowrap"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Upload File / Folder</span>
+                  </button>
+                </div>
+
+                {showReceiptUploader && (
+                  <div className="p-3.5 rounded-2xl bg-[#0f1422] border border-[#1f2a40] space-y-3">
+                    <FileUploadManager
+                      folderType="payouts"
+                      targetName={(selectedRedemption?.id ? `payout_${selectedRedemption.id}` : `payout_${Date.now()}`).toString().replace(/[^a-z0-9_-]/gi, "_")}
+                      accept="image/*,application/pdf"
+                      compact={true}
+                      onFileUploaded={(result) => {
+                        setReceiptUrl(result.url);
+                        if (selectedRedemption?.id) {
+                          fetch(`/api/admin/redemptions/${selectedRedemption.id}`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ receiptUrl: result.url }),
+                          }).catch(() => {});
                         }
                       }}
                     />
-                  </label>
-                </div>
+                  </div>
+                )}
+
                 {uploadingReceipt && (
                   <p className="text-[11px] text-amber-400 flex items-center gap-1 pt-1">
                     <Loader2 className="w-3 h-3 animate-spin" /> Uploading receipt image or registering URL...

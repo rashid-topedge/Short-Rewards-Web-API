@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   AlertCircle,
   TrendingUp,
+  Cloud,
 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -66,6 +67,12 @@ export default async function AdminDashboardPage() {
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#1e293b] hover:bg-[#334155] border border-slate-700 text-slate-200 font-semibold text-sm transition-all hover:scale-[1.02]"
             >
               <Video className="w-4 h-4 text-purple-400" /> Manage Reels
+            </Link>
+            <Link
+              href="/admin/settings"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#1e293b] hover:bg-[#334155] border border-slate-700 text-slate-200 font-semibold text-sm transition-all hover:scale-[1.02]"
+            >
+              <Cloud className="w-4 h-4 text-cyan-400" /> B2 Storage Keys
             </Link>
           </div>
         </div>

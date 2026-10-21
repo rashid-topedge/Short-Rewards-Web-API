@@ -19,7 +19,9 @@ import {
   Globe,
   EyeOff,
   Sparkles,
+  UploadCloud,
 } from "lucide-react";
+import FileUploadManager from "@/components/admin/FileUploadManager";
 import type { DramaCard, EpisodeItem } from "@/lib/types";
 
 export default function AdminDramasPage() {
@@ -49,6 +51,8 @@ export default function AdminDramasPage() {
   });
   const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
   const [uploadingFolder, setUploadingFolder] = useState(false);
+  const [showCoverUploader, setShowCoverUploader] = useState(false);
+  const [showEpisodeUploader, setShowEpisodeUploader] = useState(false);
   const [submittingDrama, setSubmittingDrama] = useState(false);
 
   // Episode Manager Modal
@@ -622,62 +626,52 @@ export default function AdminDramasPage() {
                 />
               </div>
 
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-300">Cover Image URL or Folder Upload</label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-neutral-300">Cover Image URL</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowCoverUploader(!showCoverUploader)}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-400 hover:text-rose-300 transition"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    {showCoverUploader ? "Hide Uploader" : "B2 Cloud Uploader (Progress & Resumable)"}
+                  </button>
+                </div>
+
                 <div className="flex gap-2">
                   <input
                     type="url"
                     value={dramaForm.cover}
                     onChange={(e) => setDramaForm({ ...dramaForm, cover: e.target.value })}
-                    placeholder="https://images.unsplash.com/... or upload folder"
+                    placeholder="https://images.unsplash.com/... or upload to B2"
                     className="flex-1 bg-[#161c28] border border-[#222c3f] rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-rose-500"
                   />
-                  <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#222c3f] hover:bg-[#2e3b52] text-white text-xs font-semibold transition whitespace-nowrap">
-                    <span>{uploadingFolder ? "Uploading..." : "Select Folder"}</span>
-                    <input
-                      type="file"
-                      // @ts-expect-error webkitdirectory is standard for folder picker
-                      webkitdirectory=""
-                      directory=""
-                      multiple
-                      className="hidden"
-                      onChange={async (e) => {
-                        const files = e.target.files;
-                        if (!files || files.length === 0) return;
-                        setUploadingFolder(true);
-                        try {
-                          const formData = new FormData();
-                          formData.append("folderType", "dramas");
-                          const slug = dramaForm.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `drama_${Date.now()}`;
-                          formData.append("targetName", slug);
-                          for (let i = 0; i < files.length; i++) {
-                            formData.append("files", files[i]);
-                          }
-                          const res = await fetch("/api/admin/upload-folder", {
-                            method: "POST",
-                            body: formData,
-                          });
-                          if (res.ok) {
-                            const data = await res.json();
-                            // Find cover image if present
-                            const coverFile = Object.keys(data.urls || {}).find(k => /\.(jpg|jpeg|png|webp)$/i.test(k));
-                            if (coverFile && data.urls[coverFile]) {
-                              setDramaForm(prev => ({ ...prev, cover: data.urls[coverFile] }));
-                            }
-                            alert(data.message || "Successfully uploaded folder!");
-                          } else {
-                            alert("Upload failed.");
-                          }
-                        } catch (err) {
-                          console.error("Folder upload error", err);
-                          alert("Failed to upload folder.");
-                        } finally {
-                          setUploadingFolder(false);
+                  <button
+                    type="button"
+                    onClick={() => setShowCoverUploader(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#222c3f] hover:bg-[#2e3b52] text-white text-xs font-semibold transition whitespace-nowrap"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5 text-rose-400" />
+                    Upload File / Folder
+                  </button>
+                </div>
+
+                {showCoverUploader && (
+                  <div className="p-3.5 rounded-2xl bg-[#0f1422] border border-[#1f2a40] space-y-3">
+                    <FileUploadManager
+                      folderType="dramas"
+                      targetName={dramaForm.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "drama_cover"}
+                      accept="image/*"
+                      compact={true}
+                      onFileUploaded={(result) => {
+                        if (/\.(jpg|jpeg|png|webp|gif|svg)$/i.test(result.fileName) || result.file.type.startsWith("image/")) {
+                          setDramaForm((prev) => ({ ...prev, cover: result.url }));
                         }
                       }}
                     />
-                  </label>
-                </div>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -790,49 +784,58 @@ export default function AdminDramasPage() {
                 />
               </div>
 
-              <div className="flex-1">
-                <label className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block mb-1">
-                  Video Stream URL (.m3u8 / .mp4) or Folder Upload
-                </label>
+              <div className="flex-1 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
+                    Video Stream URL (.m3u8 / .mp4)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowEpisodeUploader(!showEpisodeUploader)}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-400 hover:text-rose-300 transition"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    {showEpisodeUploader ? "Hide Uploader" : "B2 Cloud Uploader (Progress & Resumable)"}
+                  </button>
+                </div>
+
                 <div className="flex gap-2">
                   <input
                     type="url"
                     required
                     value={newEpisodeForm.url}
                     onChange={(e) => setNewEpisodeForm({ ...newEpisodeForm, url: e.target.value })}
-                    placeholder="https://stream.example.com/drama/ep1.m3u8"
+                    placeholder="https://stream.example.com/drama/ep1.m3u8 or upload video"
                     className="flex-1 bg-[#0f141f] border border-[#2a374f] rounded-lg px-3 py-1.5 text-xs text-white font-mono placeholder:text-neutral-600"
                   />
-                  <label className="cursor-pointer inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#2a374f] hover:bg-[#334155] text-white text-[10px] font-bold transition whitespace-nowrap">
-                    <span>Folder</span>
-                    <input
-                      type="file"
-                      // @ts-expect-error webkitdirectory
-                      webkitdirectory=""
-                      directory=""
-                      multiple
-                      className="hidden"
-                      onChange={async (e) => {
-                        const files = e.target.files;
-                        if (!files || files.length === 0) return;
-                        try {
-                          const formData = new FormData();
-                          formData.append("folderType", "dramas");
-                          const slug = currentDrama?.slug || currentDrama?.title?.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `drama_${currentDrama?.dramaId || Date.now()}`;
-                          formData.append("targetName", slug);
-                          for (let i = 0; i < files.length; i++) formData.append("files", files[i]);
-                          const res = await fetch("/api/admin/upload-folder", { method: "POST", body: formData });
-                          if (res.ok) {
-                            const data = await res.json();
-                            // Pick first video file for URL
-                            const videoEntry = Object.entries(data.urls || {}).find(([k]) => /\.(mp4|m3u8|webm|mov)$/i.test(k));
-                            if (videoEntry) setNewEpisodeForm(prev => ({ ...prev, url: videoEntry[1] }));
-                          }
-                        } catch (err) { console.error("Episode folder upload error", err); }
+                  <button
+                    type="button"
+                    onClick={() => setShowEpisodeUploader(true)}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#2a374f] hover:bg-[#334155] text-white text-[10px] font-bold transition whitespace-nowrap"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5 text-rose-400" /> Upload Video
+                  </button>
+                </div>
+
+                {showEpisodeUploader && (
+                  <div className="pt-2">
+                    <FileUploadManager
+                      folderType="dramas"
+                      targetName={
+                        currentDrama?.slug ||
+                        currentDrama?.title?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ||
+                        `drama_${currentDrama?.dramaId || Date.now()}`
+                      }
+                      accept="video/*,.mp4,.m3u8,.webm,.mov,.mkv"
+                      compact={true}
+                      onFileUploaded={(result) => {
+                        if (/\.(mp4|m3u8|webm|mov|mkv)$/i.test(result.fileName) || result.file.type.startsWith("video/")) {
+                          setNewEpisodeForm((prev) => ({ ...prev, url: result.url }));
+                        }
                       }}
                     />
-                  </label>
-                </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex items-end">

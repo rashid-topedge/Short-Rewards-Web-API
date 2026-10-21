@@ -231,11 +231,6 @@ async function createSchema(): Promise<void> {
     `ALTER TABLE episodes ADD COLUMN url_b2 TEXT`,
     `ALTER TABLE reels ADD COLUMN video_url_b2 TEXT`,
     `ALTER TABLE redemption_requests ADD COLUMN receipt_url_b2 TEXT`,
-    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_key_id', '', 0)`,
-    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_application_key', '', 0)`,
-    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_bucket_name', '', 0)`,
-    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_endpoint', 's3.us-west-004.backblazeb2.com', 0)`,
-    `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_public_url', '', 0)`,
     // Multi-account B2 config (one account per folder type: dramas / reels / payouts)
     `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_dramas_key_id', '', 0)`,
     `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_dramas_app_key', '', 0)`,
@@ -249,6 +244,7 @@ async function createSchema(): Promise<void> {
     `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_payouts_app_key', '', 0)`,
     `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_payouts_bucket_id', '', 0)`,
     `INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('b2_payouts_public_url', '', 0)`,
+  ];
 
   for (const sql of statements) {
     try {
@@ -350,6 +346,20 @@ export async function getSystemSettings(): Promise<SystemSettings> {
     s3AccessKey: map.get("s3_access_key") || "",
     s3SecretKey: map.get("s3_secret_key") || "",
     s3PublicUrl: map.get("s3_public_url") || "",
+
+    // Multi-account B2 config (per-folder overrides)
+    b2DramasKeyId: map.get("b2_dramas_key_id") || undefined,
+    b2DramasAppKey: map.get("b2_dramas_app_key") || undefined,
+    b2DramasBucketId: map.get("b2_dramas_bucket_id") || undefined,
+    b2DramasPublicUrl: map.get("b2_dramas_public_url") || undefined,
+    b2ReelsKeyId: map.get("b2_reels_key_id") || undefined,
+    b2ReelsAppKey: map.get("b2_reels_app_key") || undefined,
+    b2ReelsBucketId: map.get("b2_reels_bucket_id") || undefined,
+    b2ReelsPublicUrl: map.get("b2_reels_public_url") || undefined,
+    b2PayoutsKeyId: map.get("b2_payouts_key_id") || undefined,
+    b2PayoutsAppKey: map.get("b2_payouts_app_key") || undefined,
+    b2PayoutsBucketId: map.get("b2_payouts_bucket_id") || undefined,
+    b2PayoutsPublicUrl: map.get("b2_payouts_public_url") || undefined,
   };
 }
 
@@ -365,6 +375,19 @@ export async function updateSystemSettings(updates: Partial<SystemSettings>): Pr
     s3_access_key: updates.s3AccessKey !== undefined ? updates.s3AccessKey.trim() : undefined,
     s3_secret_key: updates.s3SecretKey !== undefined ? updates.s3SecretKey.trim() : undefined,
     s3_public_url: updates.s3PublicUrl !== undefined ? updates.s3PublicUrl.trim() : undefined,
+
+    b2_dramas_key_id: updates.b2DramasKeyId !== undefined ? updates.b2DramasKeyId.trim() : undefined,
+    b2_dramas_app_key: updates.b2DramasAppKey !== undefined ? updates.b2DramasAppKey.trim() : undefined,
+    b2_dramas_bucket_id: updates.b2DramasBucketId !== undefined ? updates.b2DramasBucketId.trim() : undefined,
+    b2_dramas_public_url: updates.b2DramasPublicUrl !== undefined ? updates.b2DramasPublicUrl.trim() : undefined,
+    b2_reels_key_id: updates.b2ReelsKeyId !== undefined ? updates.b2ReelsKeyId.trim() : undefined,
+    b2_reels_app_key: updates.b2ReelsAppKey !== undefined ? updates.b2ReelsAppKey.trim() : undefined,
+    b2_reels_bucket_id: updates.b2ReelsBucketId !== undefined ? updates.b2ReelsBucketId.trim() : undefined,
+    b2_reels_public_url: updates.b2ReelsPublicUrl !== undefined ? updates.b2ReelsPublicUrl.trim() : undefined,
+    b2_payouts_key_id: updates.b2PayoutsKeyId !== undefined ? updates.b2PayoutsKeyId.trim() : undefined,
+    b2_payouts_app_key: updates.b2PayoutsAppKey !== undefined ? updates.b2PayoutsAppKey.trim() : undefined,
+    b2_payouts_bucket_id: updates.b2PayoutsBucketId !== undefined ? updates.b2PayoutsBucketId.trim() : undefined,
+    b2_payouts_public_url: updates.b2PayoutsPublicUrl !== undefined ? updates.b2PayoutsPublicUrl.trim() : undefined,
   };
 
   for (const [key, val] of Object.entries(fieldMap)) {
@@ -1271,7 +1294,7 @@ export async function listDramasAdmin(options: {
   const query = options.query?.trim();
   const status = options.status || "all";
 
-  let whereClauses: string[] = [];
+  const whereClauses: string[] = [];
   const params: unknown[] = [];
 
   if (query) {
@@ -1555,7 +1578,7 @@ export async function listReelsAdmin(options: {
   const status = options.status || "all";
   const dramaId = options.dramaId;
 
-  let whereClauses: string[] = [];
+  const whereClauses: string[] = [];
   const params: unknown[] = [];
 
   if (query) {
