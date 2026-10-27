@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
-import { getReel, incrementReelLikes } from "@/lib/db";
+import { decrementReelLikes, getReel, incrementReelLikes } from "@/lib/db";
 import { flushReelViews, recordReelView, reelViewsFlushDue } from "@/lib/viewCounter";
 import { getUrlSigner } from "@/lib/b2";
 
@@ -48,6 +48,20 @@ export async function POST(
 
   try {
     const body = await req.json().catch(() => ({}));
+
+    // Feed views from the app (the reel detail GET above counts its own view).
+    // Batched in memory like GET; no database write per view.
+    if (body?.action === "view") {
+      recordReelView(id);
+      if (reelViewsFlushDue()) after(() => flushReelViews());
+      return NextResponse.json({ success: true, message: "View recorded" });
+    }
+
+    if (body?.action === "unlike") {
+      await decrementReelLikes(id);
+      return NextResponse.json({ success: true, message: "Like removed" });
+    }
+
     if (body?.action === "like") {
       await incrementReelLikes(id);
       const reel = await getReel(id);

@@ -209,7 +209,7 @@ async function initDb(): Promise<DbApi> {
 
 // Bump this whenever `statements` below changes. On a cold start we read one
 // row instead of re-running ~40 DDL statements against Turso.
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 async function createSchema(db: QueryApi): Promise<void> {
   await db.run(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
@@ -316,6 +316,9 @@ async function createSchema(db: QueryApi): Promise<void> {
     `ALTER TABLE users ADD COLUMN google_email TEXT`,
     `ALTER TABLE users ADD COLUMN google_linked_at REAL`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users (google_sub)`,
+    // Firebase Authentication: one Firebase user per app account (v8).
+    `ALTER TABLE users ADD COLUMN firebase_uid TEXT`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users (firebase_uid)`,
     // Refresh tokens (stored as SHA-256 hashes). family_id groups one login
     // session's rotations so a replayed token can revoke the whole session.
     `CREATE TABLE IF NOT EXISTS user_refresh_tokens (
@@ -857,6 +860,12 @@ export async function addReelViews(counts: Map<number, number>): Promise<void> {
 export async function incrementReelLikes(reelId: number): Promise<void> {
   const db = await getDb();
   await db.run("UPDATE reels SET like_count = like_count + 1 WHERE reel_id = ?", [reelId]);
+}
+
+/** Undo a like (never below zero). */
+export async function decrementReelLikes(reelId: number): Promise<void> {
+  const db = await getDb();
+  await db.run("UPDATE reels SET like_count = MAX(0, like_count - 1) WHERE reel_id = ?", [reelId]);
 }
 
 // ==========================================
@@ -2824,6 +2833,112 @@ export async function findOrCreateUserForGoogle(
       [googleSub, email, now, now, now, newUserId]
     );
     return { userId: newUserId, created: true };
+  });
+}
+
+export type ResolveFirebaseUserResult =
+  | { status: "ok"; userId: string; created: boolean }
+  /** legacyUserId already has a session or a Firebase user: recover it with Google instead. */
+  | { status: "legacy_claimed" }
+  /** The Firebase user linked a Google account that already belongs to another app account. */
+  | { status: "google_in_use" };
+
+/**
+ * Maps a *verified* Firebase identity to an app account. Atomic.
+ *
+ * Coins stay safe because accounts are keyed by the Firebase UID, which
+ * Firebase keeps the same when a guest links Google. Nothing is ever merged:
+ * 1. an account already bound to this UID → that account (Google fields updated);
+ * 2. else, the account already linked to this Google account (created by the
+ *    earlier /login-google flow) → bind the UID to it;
+ * 3. else, `legacyUserId` from a pre-auth app install that has never been
+ *    claimed → bind the UID to it, once;
+ * 4. else → create a new account whose user_id is the UID.
+ */
+export async function resolveFirebaseUser(input: {
+  uid: string;
+  googleSub: string | null;
+  googleEmail: string | null;
+  legacyUserId?: string | null;
+}): Promise<ResolveFirebaseUserResult> {
+  const db = await getDb();
+  const now = Date.now();
+  const { uid, googleSub, googleEmail } = input;
+
+  return db.tx(async (tx) => {
+    // Sets the Google link on `userId` unless that Google account belongs to someone else.
+    const applyGoogle = async (userId: string): Promise<boolean> => {
+      if (!googleSub) return true;
+      const owner = (await tx.get("SELECT user_id FROM users WHERE google_sub = ?", [googleSub])) as
+        | { user_id: string }
+        | undefined;
+      if (owner && owner.user_id !== userId) return false;
+      await tx.run(
+        `UPDATE users
+         SET google_sub = ?, google_email = COALESCE(?, google_email),
+             google_linked_at = COALESCE(google_linked_at, ?), updated_at = ?
+         WHERE user_id = ?`,
+        [googleSub, googleEmail, now, now, userId]
+      );
+      return true;
+    };
+
+    // 1. Already bound to this Firebase user.
+    const bound = (await tx.get("SELECT user_id FROM users WHERE firebase_uid = ?", [uid])) as
+      | { user_id: string }
+      | undefined;
+    if (bound) {
+      if (!(await applyGoogle(bound.user_id))) return { status: "google_in_use" as const };
+      return { status: "ok" as const, userId: bound.user_id, created: false };
+    }
+
+    // 2. Account previously linked to this Google account (pre-Firebase sign-in).
+    if (googleSub) {
+      const byGoogle = (await tx.get(
+        "SELECT user_id, firebase_uid FROM users WHERE google_sub = ?",
+        [googleSub]
+      )) as { user_id: string; firebase_uid: string | null } | undefined;
+      if (byGoogle && !byGoogle.firebase_uid) {
+        await tx.run(
+          `UPDATE users SET firebase_uid = ?, google_email = COALESCE(?, google_email),
+             auth_claimed_at = COALESCE(auth_claimed_at, ?), updated_at = ?
+           WHERE user_id = ?`,
+          [uid, googleEmail, now, now, byGoogle.user_id]
+        );
+        return { status: "ok" as const, userId: byGoogle.user_id, created: false };
+      }
+      if (byGoogle) return { status: "google_in_use" as const };
+    }
+
+    // 3. Pre-auth install keeping its account (works once, like /sync's userId).
+    const legacyUserId = input.legacyUserId?.trim();
+    if (legacyUserId && legacyUserId !== uid) {
+      const legacy = (await tx.get(
+        "SELECT user_id, firebase_uid, auth_claimed_at FROM users WHERE user_id = ?",
+        [legacyUserId]
+      )) as { user_id: string; firebase_uid: string | null; auth_claimed_at: number | null } | undefined;
+      if (legacy) {
+        if (legacy.firebase_uid || legacy.auth_claimed_at) return { status: "legacy_claimed" as const };
+        await tx.run(
+          "UPDATE users SET firebase_uid = ?, auth_claimed_at = ?, updated_at = ? WHERE user_id = ?",
+          [uid, now, now, legacy.user_id]
+        );
+        if (!(await applyGoogle(legacy.user_id))) return { status: "google_in_use" as const };
+        return { status: "ok" as const, userId: legacy.user_id, created: false };
+      }
+      // Unknown legacy id (never reached the server): just create a fresh account below.
+    }
+
+    // 4. New account, user_id = Firebase UID.
+    const created = await ensureUser(tx, uid, now);
+    const claimed = await tx.run(
+      `UPDATE users SET firebase_uid = ?, auth_claimed_at = COALESCE(auth_claimed_at, ?), updated_at = ?
+       WHERE user_id = ? AND (firebase_uid IS NULL OR firebase_uid = ?)`,
+      [uid, now, now, uid, uid]
+    );
+    if (claimed.changes !== 1) return { status: "legacy_claimed" as const };
+    if (!(await applyGoogle(uid))) return { status: "google_in_use" as const };
+    return { status: "ok" as const, userId: uid, created };
   });
 }
 
