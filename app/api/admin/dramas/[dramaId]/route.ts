@@ -1,4 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
+import { processB2DeleteQueue } from "@/lib/b2Cleanup";
 import { isAuthenticatedAdmin } from "@/lib/auth";
 import { getDrama, updateDramaAdmin, deleteDramaAdmin } from "@/lib/db";
 
@@ -11,7 +12,7 @@ export async function GET(
   }
   const { dramaId } = await params;
   const id = parseInt(dramaId, 10);
-  const drama = getDrama(id, true);
+  const drama = await getDrama(id, true);
   if (!drama) {
     return NextResponse.json({ error: "Drama not found" }, { status: 404 });
   }
@@ -36,7 +37,7 @@ export async function PUT(
       ? body.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
       : undefined;
 
-    const drama = updateDramaAdmin(id, {
+    const drama = await updateDramaAdmin(id, {
       title: body.title,
       cover: body.cover,
       synopsis: body.synopsis,
@@ -51,6 +52,7 @@ export async function PUT(
     if (!drama) {
       return NextResponse.json({ error: "Drama not found" }, { status: 404 });
     }
+    cleanUpStorageLater(); // in case the cover was replaced
     return NextResponse.json(drama);
   } catch {
     return NextResponse.json({ error: "Failed to update drama" }, { status: 500 });
@@ -66,6 +68,14 @@ export async function DELETE(
   }
   const { dramaId } = await params;
   const id = parseInt(dramaId, 10);
-  deleteDramaAdmin(id);
+  await deleteDramaAdmin(id);
+  cleanUpStorageLater();
   return NextResponse.json({ success: true, message: "Drama deleted successfully" });
+}
+
+/** Remove the deleted/replaced Backblaze files after the response is sent. */
+function cleanUpStorageLater() {
+  after(() =>
+    processB2DeleteQueue().catch((err) => console.error("Background B2 cleanup failed:", err))
+  );
 }

@@ -22,6 +22,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import FileUploadManager from "@/components/admin/FileUploadManager";
+import { useCursorPager } from "@/components/admin/useCursorPager";
 import type { DramaCard, EpisodeItem } from "@/lib/types";
 
 export default function AdminDramasPage() {
@@ -30,7 +31,8 @@ export default function AdminDramasPage() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "published" | "draft">("all");
-  const [offset, setOffset] = useState(0);
+  const pager = useCursorPager();
+  const { cursor, reset: resetPager, setNextCursor } = pager;
   const limit = 24;
 
   // Selection for bulk actions
@@ -74,20 +76,21 @@ export default function AdminDramasPage() {
         q: searchQuery,
         status: statusFilter,
         limit: String(limit),
-        offset: String(offset),
       });
+      if (cursor) params.set("cursor", cursor);
       const res = await fetch(`/api/admin/dramas?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setDramas(data.items || []);
         setTotal(data.total || 0);
+        setNextCursor(data.nextCursor ?? null);
       }
     } catch (err) {
       console.error("Failed to load dramas", err);
     } finally {
       setLoading(false);
     }
-  }, [searchQuery, statusFilter, offset]);
+  }, [searchQuery, statusFilter, cursor, setNextCursor]);
 
   useEffect(() => {
     fetchDramas();
@@ -371,7 +374,7 @@ export default function AdminDramasPage() {
             value={searchQuery}
             onChange={(e) => {
               setSearchQuery(e.target.value);
-              setOffset(0);
+              resetPager();
             }}
             className="w-full bg-[#161c28] border border-[#222c3f] rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder:text-neutral-500 focus:outline-none focus:border-rose-500 transition"
           />
@@ -384,7 +387,7 @@ export default function AdminDramasPage() {
               key={st}
               onClick={() => {
                 setStatusFilter(st);
-                setOffset(0);
+                resetPager();
               }}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition ${
                 statusFilter === st
@@ -574,21 +577,21 @@ export default function AdminDramasPage() {
       )}
 
       {/* Pagination Footer */}
-      {total > limit && (
+      {(pager.hasPrev || pager.hasNext) && (
         <div className="flex items-center justify-center gap-3 pt-6">
           <button
-            onClick={() => setOffset((p) => Math.max(0, p - limit))}
-            disabled={offset === 0}
+            onClick={pager.prev}
+            disabled={!pager.hasPrev || loading}
             className="px-4 py-2 rounded-xl bg-[#161c28] border border-[#222c3f] text-xs font-semibold text-white disabled:opacity-40 hover:bg-[#222c3f] transition"
           >
             Previous
           </button>
           <span className="text-xs text-neutral-400 font-mono">
-            Page {Math.floor(offset / limit) + 1} of {Math.ceil(total / limit)}
+            Page {pager.page} of {Math.max(1, Math.ceil(total / limit))}
           </span>
           <button
-            onClick={() => setOffset((p) => p + limit)}
-            disabled={offset + limit >= total}
+            onClick={pager.next}
+            disabled={!pager.hasNext || loading}
             className="px-4 py-2 rounded-xl bg-[#161c28] border border-[#222c3f] text-xs font-semibold text-white disabled:opacity-40 hover:bg-[#222c3f] transition"
           >
             Next

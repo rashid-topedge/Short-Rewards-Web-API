@@ -24,6 +24,12 @@ declare module "backblaze-b2" {
     bucketType: string;
   }
 
+  export interface B2ListBucketsResponse {
+    data: {
+      buckets: B2Bucket[];
+    };
+  }
+
   export interface B2FileItem {
     fileId: string;
     fileName: string;
@@ -140,5 +146,18 @@ declare module "backblaze-b2" {
     finishLargeFile(args: B2FinishLargeFileOptions): Promise<B2FinishLargeFileResponse>;
     listFileNames(args: { bucketId: string; startFileName?: string; maxFileCount?: number; delimiter?: string; prefix?: string }): Promise<B2ListFileNamesResponse>;
     cancelLargeFile(args: { fileId: string }): Promise<unknown>;
+    listFileVersions(args: {
+      bucketId: string;
+      startFileName?: string;
+      startFileId?: string;
+      maxFileCount?: number;
+      prefix?: string;
+    }): Promise<{ data: { files: B2FileItem[]; nextFileName?: string | null; nextFileId?: string | null } }>;
+    deleteFileVersion(args: { fileId: string; fileName: string }): Promise<unknown>;
+    getDownloadAuthorization(args: {
+      bucketId: string;
+      fileNamePrefix: string;
+      validDurationInSeconds: number;
+    }): Promise<{ data: { authorizationToken: string; bucketId: string; fileNamePrefix: string } }>;
   }
 }

@@ -85,13 +85,25 @@ export type UserProfile = {
   coins: number;
   streakDay: number;
   lastCheckInDate: string | null;
+  /** True once the user has linked a Google account (needed to recover the account on a new device). */
+  googleLinked?: boolean;
+  googleEmail?: string | null;
   canCheckInToday: boolean;
   nextCheckInReward: number;
   streakSchedule: StreakDayInfo[];
   transactions: CoinTransaction[];
 };
 
-export type CheckInResult = {
+/** Set on claim responses that didn't grant coins (or replayed an earlier claim). */
+type ClaimMeta = {
+  /** ALREADY_CLAIMED (409), DAILY_LIMIT / COOLDOWN (429), CLAIM_ID_REUSED (422). */
+  code?: "ALREADY_CLAIMED" | "DAILY_LIMIT" | "COOLDOWN" | "CLAIM_ID_REUSED";
+  alreadyClaimed?: boolean;
+  /** True when this is the stored answer to a claim ID that was already processed. */
+  replayed?: boolean;
+};
+
+export type CheckInResult = ClaimMeta & {
   success: boolean;
   message: string;
   coinsEarned: number;
@@ -101,11 +113,14 @@ export type CheckInResult = {
   user: UserProfile;
 };
 
-export type RewardResult = {
+export type RewardResult = ClaimMeta & {
   success: boolean;
   message: string;
   coinsEarned: number;
   newCoinsBalance: number;
+  /** Set when the reward was refused because of a daily cap or cooldown. */
+  limitReason?: "LIMIT" | "COOLDOWN";
+  retryAfterSeconds?: number;
   user: UserProfile;
 };
 
@@ -132,6 +147,9 @@ export type RedemptionRequest = {
 export type SystemSettings = {
   coinToPkrRate: number;
   minRedeemCoins: number;
+  maxAdRewardsPerDay: number;
+  adRewardCooldownSeconds: number;
+  maxReelRewardsPerDay: number;
   s3Endpoint: string;
   s3Bucket: string;
   s3AccessKey: string;

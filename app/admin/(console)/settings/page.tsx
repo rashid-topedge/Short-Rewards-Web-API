@@ -17,10 +17,14 @@ import {
   ShieldCheck,
   Server,
 } from "lucide-react";
+import StorageCleanupCard from "@/components/admin/StorageCleanupCard";
 
 interface SettingsData {
   coinToPkrRate: number;
   minRedeemCoins: number;
+  maxAdRewardsPerDay: number;
+  adRewardCooldownSeconds: number;
+  maxReelRewardsPerDay: number;
   s3Endpoint: string;
   s3Bucket: string;
   s3AccessKey: string;
@@ -58,6 +62,9 @@ export default function AdminSettingsPage() {
   const [form, setForm] = useState<SettingsData>({
     coinToPkrRate: 0.1,
     minRedeemCoins: 500,
+    maxAdRewardsPerDay: 10,
+    adRewardCooldownSeconds: 30,
+    maxReelRewardsPerDay: 20,
     s3Endpoint: "s3.us-west-004.backblazeb2.com",
     s3Bucket: "",
     s3AccessKey: "",
@@ -88,6 +95,9 @@ export default function AdminSettingsPage() {
           setForm({
             coinToPkrRate: data.coinToPkrRate ?? 0.1,
             minRedeemCoins: data.minRedeemCoins ?? 500,
+            maxAdRewardsPerDay: data.maxAdRewardsPerDay ?? 10,
+            adRewardCooldownSeconds: data.adRewardCooldownSeconds ?? 30,
+            maxReelRewardsPerDay: data.maxReelRewardsPerDay ?? 20,
             s3Endpoint: data.s3Endpoint || "s3.us-west-004.backblazeb2.com",
             s3Bucket: data.s3Bucket || "",
             s3AccessKey: data.s3AccessKey || "",
@@ -664,9 +674,59 @@ export default function AdminSettingsPage() {
                 Minimum payout: {(form.minRedeemCoins * form.coinToPkrRate).toFixed(0)} PKR
               </p>
             </div>
+
+            <div className="space-y-1">
+              <label className="font-semibold text-neutral-300">Max Ad Rewards per User per Day</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  step="1"
+                  min="0"
+                  value={form.maxAdRewardsPerDay}
+                  onChange={(e) => setForm({ ...form, maxAdRewardsPerDay: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#141b2b] border border-[#232f46] text-white focus:outline-none focus:border-amber-500 font-mono text-sm"
+                />
+                <span className="absolute right-3 top-2.5 text-neutral-400 text-xs font-bold">Ads</span>
+              </div>
+              <p className="text-[11px] text-neutral-400">Up to {form.maxAdRewardsPerDay * 25} coins/day from ads (25 each). 0 disables ad rewards.</p>
+            </div>
+
+            <div className="space-y-1">
+              <label className="font-semibold text-neutral-300">Cooldown Between Ad Rewards</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  step="5"
+                  min="0"
+                  value={form.adRewardCooldownSeconds}
+                  onChange={(e) => setForm({ ...form, adRewardCooldownSeconds: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#141b2b] border border-[#232f46] text-white focus:outline-none focus:border-amber-500 font-mono text-sm"
+                />
+                <span className="absolute right-3 top-2.5 text-neutral-400 text-xs font-bold">Sec</span>
+              </div>
+              <p className="text-[11px] text-neutral-400">Minimum wait between two ad rewards for the same user.</p>
+            </div>
+
+            <div className="space-y-1">
+              <label className="font-semibold text-neutral-300">Max Reel Rewards per User per Day</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  step="1"
+                  min="0"
+                  value={form.maxReelRewardsPerDay}
+                  onChange={(e) => setForm({ ...form, maxReelRewardsPerDay: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+                  className="w-full px-3 py-2 rounded-xl bg-[#141b2b] border border-[#232f46] text-white focus:outline-none focus:border-amber-500 font-mono text-sm"
+                />
+                <span className="absolute right-3 top-2.5 text-neutral-400 text-xs font-bold">Reels</span>
+              </div>
+              <p className="text-[11px] text-neutral-400">Up to {form.maxReelRewardsPerDay * 5} coins/day from reels (5 each, once per reel). 0 disables reel rewards.</p>
+            </div>
           </div>
         </div>
       </div>
+
+      <StorageCleanupCard />
 
       {/* Footer Save Button Bar */}
       <div className="flex items-center justify-end gap-3 pt-4 border-t border-[#1d273a]">

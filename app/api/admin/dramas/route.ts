@@ -12,7 +12,8 @@ export async function GET(req: NextRequest) {
   const limit = parseInt(searchParams.get("limit") || "20", 10);
   const offset = parseInt(searchParams.get("offset") || "0", 10);
 
-  const data = await listDramasAdmin({ query, status, limit, offset });
+  const cursor = searchParams.get("cursor");
+  const data = await listDramasAdmin({ query, status, limit, offset, cursor });
   return NextResponse.json(data);
 }
 
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Title is required" }, { status: 400 });
     }
 
-    const drama = createDramaAdmin({
+    const drama = await createDramaAdmin({
       title: body.title,
       slug: body.slug,
       cover: body.cover,

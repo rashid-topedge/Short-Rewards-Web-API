@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthenticatedAdmin } from "@/lib/auth";
 import { listReelsAdmin, createReelAdmin } from "@/lib/db";
+import { getUrlSigner } from "@/lib/b2";
 
 export async function GET(req: NextRequest) {
   if (!(await isAuthenticatedAdmin(req))) {
@@ -21,9 +22,20 @@ export async function GET(req: NextRequest) {
     dramaId: isNaN(dramaId as number) ? undefined : dramaId,
     limit,
     offset,
+    cursor: searchParams.get("cursor"),
   });
 
-  return NextResponse.json(data);
+  // videoUrl/thumbnailUrl stay as stored (they're what the edit form saves back);
+  // the preview* fields are signed so private-bucket media plays in the console.
+  const sign = await getUrlSigner("reels", data.items.flatMap((r) => [r.videoUrl, r.thumbnailUrl || ""]));
+  return NextResponse.json({
+    ...data,
+    items: data.items.map((r) => ({
+      ...r,
+      previewVideoUrl: sign(r.videoUrl),
+      previewThumbnailUrl: r.thumbnailUrl ? sign(r.thumbnailUrl) : null,
+    })),
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -46,7 +58,7 @@ export async function POST(req: NextRequest) {
       ? body.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
       : [];
 
-    const reel = createReelAdmin({
+    const reel = await createReelAdmin({
       title: body.title,
       synopsis: body.synopsis,
       videoUrl: body.videoUrl,

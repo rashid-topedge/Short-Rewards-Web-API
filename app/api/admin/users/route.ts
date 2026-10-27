@@ -11,7 +11,7 @@ export async function GET(req: NextRequest) {
   const limit = parseInt(searchParams.get("limit") || "20", 10);
   const offset = parseInt(searchParams.get("offset") || "0", 10);
 
-  const data = await listUsersAdmin({ query, limit, offset });
+  const data = await listUsersAdmin({ query, limit, offset, cursor: searchParams.get("cursor") });
   return NextResponse.json(data);
 }
 
@@ -30,7 +30,7 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: "userId and valid coins amount are required" }, { status: 400 });
     }
 
-    const updated = updateUserCoinsAdmin(userId, coins, streakDay, description);
+    const updated = await updateUserCoinsAdmin(userId, coins, streakDay, description);
     return NextResponse.json(updated);
   } catch (err: unknown) {
     return NextResponse.json({ error: "Failed to update user" }, { status: 500 });
@@ -46,6 +46,6 @@ export async function DELETE(req: NextRequest) {
   if (!userId) {
     return NextResponse.json({ error: "userId is required" }, { status: 400 });
   }
-  deleteUserAdmin(userId);
+  await deleteUserAdmin(userId);
   return NextResponse.json({ success: true, message: "User deleted successfully" });
 }

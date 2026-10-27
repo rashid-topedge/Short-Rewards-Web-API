@@ -11,6 +11,7 @@ export async function GET(req: NextRequest) {
   const limit = parseInt(searchParams.get("limit") || "30", 10);
   const offset = parseInt(searchParams.get("offset") || "0", 10);
 
-  const data = await listTransactionsAdmin({ userId, limit, offset });
+  const type = searchParams.get("type") || undefined;
+  const data = await listTransactionsAdmin({ userId, type, limit, offset, cursor: searchParams.get("cursor") });
   return NextResponse.json(data);
 }

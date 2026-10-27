@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthenticatedAdmin } from "@/lib/auth";
 import { listRedemptionsAdmin } from "@/lib/db";
+import { getUrlSigner } from "@/lib/b2";
 
 export async function GET(req: NextRequest) {
   if (!(await isAuthenticatedAdmin(req))) {
@@ -18,7 +19,13 @@ export async function GET(req: NextRequest) {
     userId,
     limit,
     offset,
+    cursor: searchParams.get("cursor"),
   });
 
-  return NextResponse.json(data);
+  // Receipts may live in a private bucket; give the admin page playable links.
+  const sign = await getUrlSigner("payouts", data.items.map((r) => r.receiptUrl || ""));
+  return NextResponse.json({
+    ...data,
+    items: data.items.map((r) => ({ ...r, receiptUrl: r.receiptUrl ? sign(r.receiptUrl) : r.receiptUrl })),
+  });
 }

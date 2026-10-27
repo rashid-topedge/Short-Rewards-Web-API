@@ -62,3 +62,23 @@ export async function getVideoDuration(buffer: Buffer): Promise<number | null> {
     }
   }
 }
+
+/**
+ * Like getVideoDuration, but probes a (signed) URL directly. ffprobe reads only
+ * the parts of the file it needs via HTTP range requests, so the video never
+ * has to be held in server memory.
+ */
+export async function getVideoDurationFromUrl(url: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      ["-v", "error", "-show_entries", "format=duration", "-of", "json", url],
+      { timeout: 60_000 }
+    );
+    const parsed = JSON.parse(stdout) as { format?: { duration?: string } };
+    const seconds = Number.parseFloat(parsed.format?.duration ?? "");
+    return !Number.isNaN(seconds) && seconds > 0 ? Math.round(seconds) : null;
+  } catch {
+    return null;
+  }
+}

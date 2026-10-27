@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthenticatedAdmin } from "@/lib/auth";
-import fs from "fs";
-import path from "path";
+import { FolderType, b2UploadPart, uploadBufferToB2 } from "@/lib/b2";
+import { getUploadSession, recordUploadPart } from "@/lib/db";
 
 export const maxDuration = 300;
 
+/** Receives one chunk and forwards it straight to B2 (never touches local disk). */
 export async function POST(req: NextRequest) {
   if (!(await isAuthenticatedAdmin(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -12,51 +13,56 @@ export async function POST(req: NextRequest) {
 
   try {
     const formData = await req.formData();
-    const sessionId = formData.get("sessionId") as string;
-    const chunkIndexStr = formData.get("chunkIndex") as string;
-    const chunkFile = formData.get("chunk") as File;
+    const sessionId = formData.get("sessionId");
+    const chunkIndexStr = formData.get("chunkIndex");
+    const chunkFile = formData.get("chunk");
 
-    if (!sessionId || chunkIndexStr === null || !chunkFile) {
+    if (typeof sessionId !== "string" || typeof chunkIndexStr !== "string" || !(chunkFile instanceof Blob)) {
       return NextResponse.json({ error: "Missing sessionId, chunkIndex, or chunk payload" }, { status: 400 });
     }
 
-    const chunkIndex = parseInt(chunkIndexStr, 10);
-    const sanitizedSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "");
-    const tempDir = path.resolve(process.cwd(), "public", "uploads", ".temp-chunks", sanitizedSessionId);
-
-    if (!fs.existsSync(tempDir)) {
+    const session = await getUploadSession(sessionId);
+    if (!session) {
       return NextResponse.json({ error: "Upload session not found or expired" }, { status: 404 });
     }
-
-    const chunkBytes = await chunkFile.arrayBuffer();
-    const chunkBuffer = Buffer.from(chunkBytes);
-    const chunkPath = path.join(tempDir, `chunk_${chunkIndex}.part`);
-
-    fs.writeFileSync(chunkPath, chunkBuffer);
-
-    // Update session record
-    const sessionPath = path.join(tempDir, "session.json");
-    let sessionData = { uploadedChunks: [] as number[], totalChunks: 0 };
-    if (fs.existsSync(sessionPath)) {
-      try {
-        sessionData = JSON.parse(fs.readFileSync(sessionPath, "utf-8"));
-      } catch {
-        // ignore parse error
-      }
+    if (session.status !== "uploading") {
+      return NextResponse.json({ error: `Upload session is ${session.status}` }, { status: 409 });
     }
 
-    if (!sessionData.uploadedChunks.includes(chunkIndex)) {
-      sessionData.uploadedChunks.push(chunkIndex);
-      sessionData.uploadedChunks.sort((a, b) => a - b);
-      fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
+    const chunkIndex = parseInt(chunkIndexStr, 10);
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
+      return NextResponse.json({ error: "chunkIndex out of range" }, { status: 400 });
     }
+
+    const isLast = chunkIndex === session.totalChunks - 1;
+    const expectedSize = isLast ? session.fileSize - session.chunkSize * chunkIndex : session.chunkSize;
+    if (chunkFile.size !== expectedSize) {
+      return NextResponse.json(
+        { error: `Chunk ${chunkIndex} should be ${expectedSize} bytes, got ${chunkFile.size}` },
+        { status: 400 }
+      );
+    }
+
+    const buffer = Buffer.from(await chunkFile.arrayBuffer());
+    const folderType = session.folderType as FolderType;
+
+    let sha1: string;
+    if (session.b2FileId) {
+      sha1 = await b2UploadPart(folderType, session.b2FileId, chunkIndex + 1, buffer);
+    } else {
+      // Single-chunk file: upload it as a normal B2 file right away.
+      await uploadBufferToB2({ folderType, b2FileName: session.b2FileName, buffer, mimeType: session.mimeType });
+      sha1 = "single";
+    }
+
+    const uploadedChunks = await recordUploadPart(sessionId, chunkIndex, sha1);
 
     return NextResponse.json({
       success: true,
       chunkIndex,
-      uploadedCount: sessionData.uploadedChunks.length,
-      totalChunks: sessionData.totalChunks,
-      uploadedChunks: sessionData.uploadedChunks,
+      uploadedCount: uploadedChunks.length,
+      totalChunks: session.totalChunks,
+      uploadedChunks,
     });
   } catch (err: unknown) {
     console.error("Chunk part upload error:", err);

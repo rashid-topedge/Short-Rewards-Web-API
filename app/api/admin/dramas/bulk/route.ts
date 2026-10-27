@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
 
     if (body?.all) {
       const onlyWithEpisodes = Boolean(body?.onlyWithEpisodes);
-      bulkUpdateAllDramasPublish(isPublished, onlyWithEpisodes);
+      await bulkUpdateAllDramasPublish(isPublished, onlyWithEpisodes);
       return NextResponse.json({
         success: true,
         message: `All dramas ${isPublished ? "published" : "unpublished"} successfully`,
@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No drama IDs provided" }, { status: 400 });
     }
 
-    const count = bulkUpdateDramasPublish(dramaIds, isPublished);
+    const count = await bulkUpdateDramasPublish(dramaIds, isPublished);
     return NextResponse.json({
       success: true,
       count,

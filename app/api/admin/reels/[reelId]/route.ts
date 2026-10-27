@@ -1,4 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
+import { processB2DeleteQueue } from "@/lib/b2Cleanup";
 import { isAuthenticatedAdmin } from "@/lib/auth";
 import { getReel, updateReelAdmin, deleteReelAdmin } from "@/lib/db";
 
@@ -56,6 +57,7 @@ export async function PUT(
       return NextResponse.json({ error: "Reel not found" }, { status: 404 });
     }
 
+    cleanUpStorageLater(); // in case the video or thumbnail was replaced
     return NextResponse.json(reel);
   } catch {
     return NextResponse.json({ error: "Failed to update reel" }, { status: 500 });
@@ -73,5 +75,13 @@ export async function DELETE(
   const { reelId } = await params;
   const id = parseInt(reelId, 10);
   await deleteReelAdmin(id);
+  cleanUpStorageLater();
   return NextResponse.json({ success: true, message: "Reel deleted successfully" });
+}
+
+/** Remove the deleted/replaced Backblaze files after the response is sent. */
+function cleanUpStorageLater() {
+  after(() =>
+    processB2DeleteQueue().catch((err) => console.error("Background B2 cleanup failed:", err))
+  );
 }

@@ -22,6 +22,8 @@ export default function AdminUsersPage() {
   const [total, setTotal] = useState(0);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Edit user modal
   const [editUser, setEditUser] = useState<UserProfile | null>(null);
@@ -34,19 +36,29 @@ export default function AdminUsersPage() {
   const [historyTransactions, setHistoryTransactions] = useState<CoinTransaction[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
 
-  async function fetchUsers(searchQuery: string = query) {
-    setLoading(true);
+  // Pages with a cursor: the first call replaces the list, "Load more" appends.
+  async function fetchUsers(searchQuery: string = query, cursor: string | null = null) {
+    if (cursor) setLoadingMore(true);
+    else setLoading(true);
     try {
-      const res = await fetch(`/api/admin/users?q=${encodeURIComponent(searchQuery)}&limit=50`);
+      const params = new URLSearchParams({ q: searchQuery, limit: "50" });
+      if (cursor) params.set("cursor", cursor);
+      const res = await fetch(`/api/admin/users?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
-        setUsers(data.items || []);
+        setUsers((prev) => (cursor ? [...prev, ...(data.items || [])] : data.items || []));
         setTotal(data.total || 0);
+        setNextCursor(data.nextCursor ?? null);
       }
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }
+
+  const loadMore = () => {
+    if (nextCursor) void fetchUsers(query, nextCursor);
+  };
 
   useEffect(() => {
     fetchUsers();
@@ -251,6 +263,22 @@ export default function AdminUsersPage() {
           </table>
         </div>
       </div>
+
+      {nextCursor && (
+        <div className="flex flex-col items-center gap-2 pt-4">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="px-5 py-2.5 rounded-xl bg-[#161c28] border border-[#222c3f] text-sm font-semibold text-white disabled:opacity-50 hover:bg-[#222c3f] focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 transition"
+          >
+            {loadingMore ? "Loading…" : "Load more"}
+          </button>
+          <p className="text-xs text-neutral-400" aria-live="polite">
+            Showing {users.length.toLocaleString()} of {total.toLocaleString()} users
+          </p>
+        </div>
+      )}
 
       {/* Edit User Modal */}
       {editUser && (

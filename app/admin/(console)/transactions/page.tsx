@@ -19,23 +19,33 @@ export default function AdminTransactionsPage() {
   const [total, setTotal] = useState(0);
   const [userFilter, setUserFilter] = useState("");
   const [loading, setLoading] = useState(true);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
-  async function fetchTransactions(userId: string = userFilter) {
-    setLoading(true);
+  // Pages with a cursor: the first call replaces the list, "Load more" appends.
+  async function fetchTransactions(userId: string = userFilter, cursor: string | null = null) {
+    if (cursor) setLoadingMore(true);
+    else setLoading(true);
     try {
-      const url = userId
-        ? `/api/admin/transactions?userId=${encodeURIComponent(userId)}&limit=100`
-        : `/api/admin/transactions?limit=100`;
-      const res = await fetch(url);
+      const params = new URLSearchParams({ limit: "100" });
+      if (userId) params.set("userId", userId);
+      if (cursor) params.set("cursor", cursor);
+      const res = await fetch(`/api/admin/transactions?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
-        setTransactions(data.items || []);
+        setTransactions((prev) => (cursor ? [...prev, ...(data.items || [])] : data.items || []));
         setTotal(data.total || 0);
+        setNextCursor(data.nextCursor ?? null);
       }
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }
+
+  const loadMore = () => {
+    if (nextCursor) void fetchTransactions(userFilter, nextCursor);
+  };
 
   useEffect(() => {
     fetchTransactions();
@@ -189,6 +199,22 @@ export default function AdminTransactionsPage() {
           </table>
         </div>
       </div>
+
+      {nextCursor && (
+        <div className="flex flex-col items-center gap-2 pt-4">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="px-5 py-2.5 rounded-xl bg-[#161c28] border border-[#222c3f] text-sm font-semibold text-white disabled:opacity-50 hover:bg-[#222c3f] focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 transition"
+          >
+            {loadingMore ? "Loading…" : "Load more"}
+          </button>
+          <p className="text-xs text-neutral-400" aria-live="polite">
+            Showing {transactions.length.toLocaleString()} of {total.toLocaleString()} transactions
+          </p>
+        </div>
+      )}
     </div>
   );
 }

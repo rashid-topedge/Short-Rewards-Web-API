@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthenticatedAdmin } from "@/lib/auth";
-import { FolderType, getB2ConfigForFolder, uploadBufferToB2, saveBufferLocally, listB2FileNames, buildPublicUrl } from "@/lib/b2";
+import { FolderType, b2FileExists, b2PublicUrl, getB2ConfigForFolder, uploadBufferToB2 } from "@/lib/b2";
 import { createReelAdmin } from "@/lib/db";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { getVideoDuration } from "@/lib/video";
-import fs from "fs";
 
 export const maxDuration = 300;
+
+const FOLDER_TYPES: FolderType[] = ["dramas", "reels", "payouts"];
 
 export async function POST(req: NextRequest) {
   if (!(await isAuthenticatedAdmin(req))) {
@@ -18,9 +17,12 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const folderType = ((formData.get("folderType") as string) || "dramas") as FolderType;
     const targetName = (formData.get("targetName") as string) || `item_${Date.now()}`;
-    const files = formData.getAll("files") as File[];
+    const files = formData.getAll("files").filter((f): f is File => f instanceof File);
 
-    if (!files || files.length === 0) {
+    if (!FOLDER_TYPES.includes(folderType)) {
+      return NextResponse.json({ error: "Invalid folderType" }, { status: 400 });
+    }
+    if (files.length === 0) {
       return NextResponse.json({ error: "No files provided for upload" }, { status: 400 });
     }
 
@@ -31,30 +33,26 @@ export async function POST(req: NextRequest) {
 
     const uploadedUrls: Record<string, string> = {};
     const sanitizedTarget = targetName.replace(/[^a-zA-Z0-9._-]/g, "_");
-    let existingB2Names = new Set<string>();
-    try {
-      existingB2Names = await listB2FileNames(folderType);
-    } catch {
-      // Ignore listing failure; proceed with uploads.
-    }
-
-    let b2SuccessCount = 0;
+    let uploadedCount = 0;
+    let skippedCount = 0;
 
     for (const file of files) {
-      const bytes = await file.arrayBuffer();
-      const buffer = Buffer.from(bytes);
       const sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const isFlat = folderType === "reels";
-      const b2FileName = isFlat
-        ? `${folderType}/${sanitizedFilename}`
-        : `${folderType}/${sanitizedTarget}/${sanitizedFilename}`;
+      const b2FileName =
+        folderType === "reels"
+          ? `${folderType}/${sanitizedFilename}`
+          : `${folderType}/${sanitizedTarget}/${sanitizedFilename}`;
 
-      let finalUrl = "";
+      // One cheap lookup per file instead of listing the entire bucket.
+      const exists = await b2FileExists(folderType, b2FileName).catch(() => false);
 
-      if (existingB2Names.has(b2FileName)) {
-        finalUrl = buildPublicUrl(b2Config, b2FileName);
-        b2SuccessCount++;
+      let finalUrl: string;
+      let buffer: Buffer | null = null;
+      if (exists) {
+        finalUrl = await b2PublicUrl(folderType, b2FileName);
+        skippedCount++;
       } else {
+        buffer = Buffer.from(await file.arrayBuffer());
         const result = await uploadBufferToB2({
           folderType,
           b2FileName,
@@ -62,12 +60,12 @@ export async function POST(req: NextRequest) {
           mimeType: file.type || "application/octet-stream",
         });
         finalUrl = result.url;
-        b2SuccessCount++;
+        uploadedCount++;
       }
 
       uploadedUrls[file.name] = finalUrl;
 
-      if (folderType === "reels" && finalUrl) {
+      if (folderType === "reels" && finalUrl && buffer) {
         try {
           const durationSeconds = (await getVideoDuration(buffer)) || 0;
           await createReelAdmin({
@@ -83,13 +81,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const message = `Successfully processed ${b2SuccessCount} file(s) to Backblaze B2 (${folderType}).`;
-
     return NextResponse.json({
       success: true,
       urls: uploadedUrls,
       b2Configured: true,
-      message,
+      message: `Uploaded ${uploadedCount} file(s) to Backblaze B2 (${folderType}); ${skippedCount} already existed.`,
     });
   } catch (err: unknown) {
     console.error("Folder upload failed:", err);

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
-import { getSystemSettings } from "@/lib/db";
-import fs from "fs";
 import path from "path";
+import { isAuthenticatedAdmin } from "@/lib/auth";
+import { getB2ConfigForFolder, getUrlSigner, saveBufferLocally, uploadBufferToB2 } from "@/lib/b2";
+
+const MAX_RECEIPT_BYTES = 10 * 1024 * 1024;
 
 export async function POST(req: NextRequest) {
   if (!(await isAuthenticatedAdmin(req))) {
@@ -10,56 +11,56 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const formData = await req.formData();
-    const file = formData.get("file") as File | null;
-    const directUrl = formData.get("url") as string | null;
+    // The payouts page sends either multipart (file upload) or JSON ({ url }).
+    const isJson = (req.headers.get("content-type") || "").includes("application/json");
+    let file: File | null = null;
+    let directUrl: string | null = null;
+
+    if (isJson) {
+      const body = await req.json().catch(() => ({}));
+      directUrl = typeof body?.url === "string" ? body.url : null;
+    } else {
+      const formData = await req.formData();
+      const f = formData.get("file");
+      file = f instanceof File ? f : null;
+      const u = formData.get("url");
+      directUrl = typeof u === "string" ? u : null;
+    }
 
     if (directUrl?.trim()) {
-      return NextResponse.json({
-        success: true,
-        url: directUrl.trim(),
-        message: "Receipt URL registered",
-      });
+      return NextResponse.json({ success: true, url: directUrl.trim(), message: "Receipt URL registered" });
     }
 
     if (!file) {
       return NextResponse.json({ error: "File or URL is required" }, { status: 400 });
     }
+    if (file.size > MAX_RECEIPT_BYTES) {
+      return NextResponse.json({ error: "Receipt image must be under 10 MB" }, { status: 400 });
+    }
 
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
-    const ext = path.extname(file.name) || ".jpg";
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const ext = (path.extname(file.name) || ".jpg").replace(/[^a-zA-Z0-9.]/g, "");
     const filename = `receipt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
 
-    const settings = await getSystemSettings();
-
-    // Check if Cloudflare R2 / S3 credentials exist
-    if (settings.s3Endpoint && settings.s3Bucket && settings.s3AccessKey && settings.s3SecretKey) {
-      // In production with R2 / S3 configured
-      const s3Url = settings.s3PublicUrl
-        ? `${settings.s3PublicUrl.replace(/\/$/, "")}/${filename}`
-        : `${settings.s3Endpoint.replace(/\/$/, "")}/${settings.s3Bucket}/${filename}`;
-
+    if (await getB2ConfigForFolder("payouts")) {
+      const result = await uploadBufferToB2({
+        folderType: "payouts",
+        b2FileName: `payouts/receipts/${filename}`,
+        buffer,
+        mimeType: file.type || "image/jpeg",
+      });
+      const sign = await getUrlSigner("payouts", [result.url]);
       return NextResponse.json({
         success: true,
-        url: s3Url,
-        message: "Receipt uploaded to Cloudflare R2 / S3 storage",
+        url: result.url,
+        previewUrl: sign(result.url),
+        message: "Receipt uploaded to Backblaze B2",
       });
     }
 
-    // Local uploads directory fallback for development / self-hosted
-    const uploadDir = path.resolve(process.cwd(), "public", "uploads", "receipts");
-    fs.mkdirSync(uploadDir, { recursive: true });
-    const filePath = path.join(uploadDir, filename);
-    fs.writeFileSync(filePath, buffer);
-
-    const publicUrl = `/uploads/receipts/${filename}`;
-
-    return NextResponse.json({
-      success: true,
-      url: publicUrl,
-      message: "Receipt screenshot saved successfully",
-    });
+    // Local fallback for development only (doesn't work with multiple servers).
+    const local = saveBufferLocally({ folderType: "payouts", targetName: "receipts", fileName: filename, buffer });
+    return NextResponse.json({ success: true, url: local.url, message: "Receipt screenshot saved locally" });
   } catch (err: unknown) {
     console.error("Failed to upload receipt:", err);
     return NextResponse.json({ error: "Failed to upload receipt image" }, { status: 500 });

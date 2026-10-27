@@ -21,6 +21,10 @@ export async function PUT(req: NextRequest) {
     const updated = await updateSystemSettings({
       coinToPkrRate: body.coinToPkrRate !== undefined ? Number(body.coinToPkrRate) : undefined,
       minRedeemCoins: body.minRedeemCoins !== undefined ? Number(body.minRedeemCoins) : undefined,
+      maxAdRewardsPerDay: body.maxAdRewardsPerDay !== undefined ? Number(body.maxAdRewardsPerDay) : undefined,
+      adRewardCooldownSeconds:
+        body.adRewardCooldownSeconds !== undefined ? Number(body.adRewardCooldownSeconds) : undefined,
+      maxReelRewardsPerDay: body.maxReelRewardsPerDay !== undefined ? Number(body.maxReelRewardsPerDay) : undefined,
       s3Endpoint: body.s3Endpoint,
       s3Bucket: body.s3Bucket,
       s3AccessKey: body.s3AccessKey,

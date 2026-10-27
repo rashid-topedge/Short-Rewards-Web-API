@@ -108,43 +108,6 @@ export async function getB2Client(keyId: string, applicationKey: string): Promis
 }
 
 /**
- * Lists every file name currently stored in the B2 bucket for a folder type.
- * Returns a Set of file names so callers can cheaply skip already-uploaded files.
- *
- * On any error (missing config, 401, insufficient permissions) this returns an
- * empty Set — callers should treat that as "unknown" and upload normally.
- */
-export async function listB2FileNames(folderType: FolderType): Promise<Set<string>> {
-  const names = new Set<string>();
-  const config = await getB2ConfigForFolder(folderType);
-  if (!config) return names;
-
-  try {
-    const { client } = await getB2Client(config.keyId, config.applicationKey);
-    let startFileName = "";
-    while (true) {
-      const res = await client.listFileNames({
-        bucketId: config.bucketId,
-        startFileName,
-        maxFileCount: 1000,
-      });
-      const files = (res.data?.files || []) as Array<{ fileName?: string }>;
-      for (const f of files) {
-        if (f.fileName) names.add(f.fileName);
-      }
-      const next = res.data?.nextFileName;
-      if (!next) break;
-      startFileName = next;
-    }
-  } catch (err) {
-    console.error(`Failed to list existing B2 files for ${folderType}:`, err);
-    return new Set<string>();
-  }
-
-  return names;
-}
-
-/**
  * Tests credentials and bucket accessibility against Backblaze B2 API.
  */
 export async function testB2Connection(creds: {
@@ -209,49 +172,39 @@ export async function testB2Connection(creds: {
   }
 }
 
-/**
- * Constructs the canonical public access URL for an uploaded file.
- */
-/**
- * Resolves the bucket name from a bucket ID using the B2 client (server-side).
- */
-export async function resolveBucketName(client: B2, bucketId: string): Promise<string | null> {
+// Bucket names/types never change for a bucket id, so cache them for the process.
+const bucketInfoCache = new Map<string, { bucketName: string | null; bucketType: string | null }>();
+
+async function getBucketInfo(client: B2, bucketId: string): Promise<{ bucketName: string | null; bucketType: string | null }> {
+  const cached = bucketInfoCache.get(bucketId);
+  if (cached) return cached;
+
+  let info: { bucketName: string | null; bucketType: string | null } = { bucketName: null, bucketType: null };
   try {
     const single = await client.getBucket({ bucketId });
     const b = single.data.buckets?.[0];
-    if (b?.bucketName) return b.bucketName;
+    if (b?.bucketName) info = { bucketName: b.bucketName, bucketType: b.bucketType ?? null };
   } catch {
     // ignore
   }
-  try {
-    const list = await client.listBuckets();
-    const buckets = (list.data?.buckets || []) as Array<{ bucketId?: string; bucketName?: string }>;
-    const match = buckets.find((b) => b.bucketId === bucketId);
-    if (match?.bucketName) return match.bucketName;
-  } catch {
-    // ignore
+  if (!info.bucketName) {
+    try {
+      const list = await client.listBuckets();
+      const match = (list.data?.buckets || []).find((b: B2Bucket) => b.bucketId === bucketId);
+      if (match?.bucketName) info = { bucketName: match.bucketName, bucketType: match.bucketType ?? null };
+    } catch {
+      // ignore
+    }
   }
-  return null;
+  if (info.bucketName) bucketInfoCache.set(bucketId, info);
+  return info;
 }
 
-export async function buildAuthorizedPublicUrl(config: B2Config, b2FileName: string, downloadUrl?: string, bucketName?: string): Promise<string> {
-  const url = buildPublicUrl(config, b2FileName, downloadUrl, bucketName);
-  try {
-    const { client } = await getB2Client(config.keyId, config.applicationKey);
-    const authRes = await (client as any).getDownloadAuthorization({
-      bucketId: config.bucketId,
-      fileNamePrefix: b2FileName,
-      validDurationInSeconds: 604800,
-    });
-    const token = authRes.data?.authorizationToken ?? authRes.data?.downloadAuthorization ?? null;
-    if (token && typeof token === "string") {
-      const separator = url.includes("?") ? "&" : "?";
-      return `${url}${separator}Authorization=${encodeURIComponent(token)}`;
-    }
-  } catch {
-    // fall back to unauthorized URL
-  }
-  return url;
+/**
+ * Resolves the bucket name from a bucket ID using the B2 client (server-side). Cached.
+ */
+export async function resolveBucketName(client: B2, bucketId: string): Promise<string | null> {
+  return (await getBucketInfo(client, bucketId)).bucketName;
 }
 
 export function buildPublicUrl(config: B2Config, b2FileName: string, downloadUrl?: string, bucketName?: string): string {
@@ -407,4 +360,239 @@ export function saveBufferLocally(options: {
     url: `/uploads/${folderType}/${sanitizedTarget}/${sanitizedFilename}`,
     storage: "local",
   };
+}
+
+// ==========================================
+// SIGNED DOWNLOAD URLS (cached)
+// ==========================================
+
+// One download token per (bucket, top-level folder), valid 7 days and reused
+// for 6, so serving a feed of N videos costs zero B2 API calls on a warm instance.
+const DOWNLOAD_TOKEN_VALID_SECONDS = 7 * 24 * 60 * 60;
+const DOWNLOAD_TOKEN_REUSE_MS = 6 * 24 * 60 * 60 * 1000;
+const downloadTokenCache = new Map<string, { token: string | null; fetchedAt: number }>();
+
+async function getDownloadToken(client: B2, bucketId: string, prefix: string): Promise<string | null> {
+  const key = `${bucketId}:${prefix}`;
+  const cached = downloadTokenCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < DOWNLOAD_TOKEN_REUSE_MS) return cached.token;
+
+  let token: string | null = null;
+  try {
+    const res = await client.getDownloadAuthorization({
+      bucketId,
+      fileNamePrefix: prefix,
+      validDurationInSeconds: DOWNLOAD_TOKEN_VALID_SECONDS,
+    });
+    token = res.data?.authorizationToken ?? null;
+  } catch (err) {
+    console.error("B2 getDownloadAuthorization failed:", err);
+    return cached?.token ?? null; // keep serving the old token rather than none
+  }
+  if (downloadTokenCache.size > 5000) downloadTokenCache.clear(); // per-file tokens: keep memory bounded
+  downloadTokenCache.set(key, { token, fetchedAt: Date.now() });
+  return token;
+}
+
+/** Extracts the B2 file name from a stored URL (".../file/<bucket>/<name>" or "<publicUrl>/<name>"). */
+export function b2FileNameFromUrl(url: string, publicUrl?: string): string | null {
+  const clean = url.split("?")[0];
+  const match = clean.match(/\/file\/[^/]+\/(.+)$/);
+  if (match) return match[1];
+  if (publicUrl) {
+    const base = publicUrl.replace(/\/$/, "") + "/";
+    if (clean.startsWith(base)) return clean.slice(base.length);
+  }
+  return null;
+}
+
+/** Token scope for a file: its top-level folder ("reels/"), or the file itself if at bucket root. */
+function tokenPrefixFor(fileName: string): string {
+  const slash = fileName.indexOf("/");
+  return slash >= 0 ? fileName.slice(0, slash + 1) : fileName;
+}
+
+/**
+ * Returns a function that turns stored video URLs into playable URLs.
+ * Public buckets are returned as-is; private buckets get a download token
+ * scoped to the file's top-level folder (never the whole bucket).
+ * Pass the URLs you will sign so all B2 calls (normally none on a warm
+ * instance, thanks to caching) happen up front; the returned function is sync.
+ */
+export async function getUrlSigner(
+  folderType: FolderType,
+  urls: string[],
+  options: { scope?: "folder" | "file" } = {}
+): Promise<(url: string) => string> {
+  // "file" scope issues one token per file; use it whenever the links go to an
+  // end user and the folder holds other users' files (e.g. payout receipts).
+  const prefixFor = options.scope === "file" ? (name: string) => name : tokenPrefixFor;
+  const identity = (url: string) => url;
+  const config = await getB2ConfigForFolder(folderType);
+  if (!config) return identity;
+
+  try {
+    const { client, downloadUrl } = await getB2Client(config.keyId, config.applicationKey);
+    const { bucketName, bucketType } = await getBucketInfo(client, config.bucketId);
+    if (bucketType === "allPublic") return identity;
+
+    const prefixes = new Set<string>();
+    for (const url of urls) {
+      const fileName = url ? b2FileNameFromUrl(url, config.publicUrl) : null;
+      if (fileName) prefixes.add(prefixFor(fileName));
+    }
+    const tokens = new Map<string, string | null>();
+    await Promise.all(
+      [...prefixes].map(async (prefix) => {
+        tokens.set(prefix, await getDownloadToken(client, config.bucketId, prefix));
+      })
+    );
+
+    return (url: string) => {
+      if (!url) return url;
+      const fileName = b2FileNameFromUrl(url, config.publicUrl);
+      if (!fileName) return url;
+      const token = tokens.get(prefixFor(fileName));
+      const base = buildPublicUrl(config, fileName, downloadUrl, bucketName || undefined);
+      return token ? `${base}?Authorization=${encodeURIComponent(token)}` : base;
+    };
+  } catch (err) {
+    console.error(`Failed to prepare B2 URL signer for ${folderType}:`, err);
+    return identity;
+  }
+}
+
+// ==========================================
+// STREAMED LARGE-FILE UPLOADS (one chunk = one B2 part)
+// ==========================================
+
+/** B2 requires every part except the last to be at least 5 MB. */
+export const B2_MIN_PART_BYTES = 5_000_000;
+
+async function requireConfig(folderType: FolderType): Promise<{ config: B2Config; client: B2; downloadUrl: string }> {
+  const config = await getB2ConfigForFolder(folderType);
+  if (!config) throw new Error(`No Backblaze B2 configuration found for bucket category: ${folderType}`);
+  const { client, downloadUrl } = await getB2Client(config.keyId, config.applicationKey);
+  return { config, client, downloadUrl };
+}
+
+export async function b2StartLargeFile(folderType: FolderType, b2FileName: string, mimeType?: string): Promise<string> {
+  const { config, client } = await requireConfig(folderType);
+  const res = await client.startLargeFile({
+    bucketId: config.bucketId,
+    fileName: b2FileName,
+    contentType: mimeType || "application/octet-stream",
+  });
+  return res.data.fileId;
+}
+
+/** Uploads one part; returns its SHA-1 (needed to finish the file). */
+export async function b2UploadPart(folderType: FolderType, fileId: string, partNumber: number, data: Buffer): Promise<string> {
+  const { client } = await requireConfig(folderType);
+  const urlRes = await client.getUploadPartUrl({ fileId });
+  const res = await client.uploadPart({
+    uploadUrl: urlRes.data.uploadUrl,
+    uploadAuthToken: urlRes.data.authorizationToken,
+    partNumber,
+    data,
+  });
+  return res.data.contentSha1;
+}
+
+export async function b2FinishLargeFile(folderType: FolderType, fileId: string, partSha1Array: string[]): Promise<void> {
+  const { client } = await requireConfig(folderType);
+  await client.finishLargeFile({ fileId, partSha1Array });
+}
+
+export async function b2CancelLargeFile(folderType: FolderType, fileId: string): Promise<void> {
+  const { client } = await requireConfig(folderType);
+  await client.cancelLargeFile({ fileId });
+}
+
+/** Public (unsigned) URL for a file, as stored in the database. */
+export async function b2PublicUrl(folderType: FolderType, b2FileName: string): Promise<string> {
+  const { config, client, downloadUrl } = await requireConfig(folderType);
+  const bucketName = await resolveBucketName(client, config.bucketId);
+  return buildPublicUrl(config, b2FileName, downloadUrl, bucketName || undefined);
+}
+
+/** True if a file with exactly this name exists in the folder's bucket. */
+export async function b2FileExists(folderType: FolderType, b2FileName: string): Promise<boolean> {
+  const { config, client } = await requireConfig(folderType);
+  const res = await client.listFileNames({ bucketId: config.bucketId, startFileName: b2FileName, maxFileCount: 1 });
+  return res.data?.files?.[0]?.fileName === b2FileName;
+}
+
+// ==========================================
+// DELETING FILES
+// ==========================================
+
+/**
+ * Turns a stored media URL into a B2 file name in the folder's configured bucket.
+ * Returns null for anything that isn't ours (external links, other buckets), so
+ * we never delete by name in the wrong bucket.
+ */
+export async function resolveOwnedFileName(folderType: FolderType, url: string): Promise<string | null> {
+  const config = await getB2ConfigForFolder(folderType);
+  if (!config) return null;
+  const clean = url.split("?")[0];
+
+  const m = clean.match(/\/file\/([^/]+)\/(.+)$/);
+  if (m) {
+    const { client } = await getB2Client(config.keyId, config.applicationKey);
+    const { bucketName } = await getBucketInfo(client, config.bucketId);
+    const urlBucket = m[1];
+    if (urlBucket !== bucketName && urlBucket !== config.bucketId) return null;
+    return decodeURIComponent(m[2]);
+  }
+  if (config.publicUrl) {
+    const base = config.publicUrl.replace(/\/$/, "") + "/";
+    if (clean.startsWith(base)) return decodeURIComponent(clean.slice(base.length));
+  }
+  return null;
+}
+
+/** Deletes every stored version of a file. Returns how many versions were removed (0 = already gone). */
+export async function b2DeleteFile(folderType: FolderType, fileName: string): Promise<number> {
+  const { config, client } = await requireConfig(folderType);
+  let deleted = 0;
+  let startFileName: string | undefined = fileName;
+  let startFileId: string | undefined;
+  for (;;) {
+    const res = await client.listFileVersions({
+      bucketId: config.bucketId,
+      startFileName,
+      startFileId,
+      maxFileCount: 100,
+      prefix: fileName,
+    });
+    const versions = (res.data?.files || []).filter((f) => f.fileName === fileName);
+    for (const v of versions) {
+      await client.deleteFileVersion({ fileId: v.fileId, fileName: v.fileName });
+      deleted++;
+    }
+    if (res.data?.nextFileName !== fileName || !res.data?.nextFileId) break;
+    startFileName = res.data.nextFileName;
+    startFileId = res.data.nextFileId;
+  }
+  return deleted;
+}
+
+/** Lists finished files under a prefix (used by the orphan scan). */
+export async function b2ListFiles(
+  folderType: FolderType,
+  prefix: string
+): Promise<{ fileName: string; size: number; uploadedAt: number }[]> {
+  const { config, client } = await requireConfig(folderType);
+  const out: { fileName: string; size: number; uploadedAt: number }[] = [];
+  let startFileName: string | undefined;
+  for (;;) {
+    const res = await client.listFileNames({ bucketId: config.bucketId, prefix, startFileName, maxFileCount: 1000 });
+    for (const f of res.data?.files || []) {
+      out.push({ fileName: f.fileName, size: f.contentLength, uploadedAt: f.uploadTimestamp });
+    }
+    if (!res.data?.nextFileName) break;
+    startFileName = res.data.nextFileName;
+  }
+  return out;
 }

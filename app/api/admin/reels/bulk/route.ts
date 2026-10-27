@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No reel IDs provided" }, { status: 400 });
     }
 
-    const count = bulkUpdateReelsPublish(reelIds, isPublished);
+    const count = await bulkUpdateReelsPublish(reelIds, isPublished);
     return NextResponse.json({
       success: true,
       count,
