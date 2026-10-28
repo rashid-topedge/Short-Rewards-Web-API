@@ -1,25 +1,35 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
-import { listReelsAdmin, createReelAdmin } from "@/lib/db";
+import { requireStaff } from "@/lib/auth";
+import { createReelAdmin, getReelAdmin, listReelsAdmin, logActivity } from "@/lib/db";
 import { getUrlSigner } from "@/lib/b2";
+import { actorOf, reelPermissions } from "@/lib/reelPermissions";
 
+/**
+ * GET /api/admin/reels?status=all|published|draft|pending&mine=1&q=&cursor=
+ * Admins and moderators. Each item carries `permissions` for the signed-in user.
+ */
 export async function GET(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
+  const { session } = auth;
 
   const { searchParams } = new URL(req.url);
-  const query = searchParams.get("q") || "";
-  const status = (searchParams.get("status") || "all") as "all" | "published" | "draft";
+  const statusParam = searchParams.get("status") || "all";
+  const status = (["all", "published", "draft", "pending"].includes(statusParam) ? statusParam : "all") as
+    | "all"
+    | "published"
+    | "draft"
+    | "pending";
   const dramaIdParam = searchParams.get("dramaId");
   const dramaId = dramaIdParam ? parseInt(dramaIdParam, 10) : undefined;
   const limit = parseInt(searchParams.get("limit") || "20", 10);
   const offset = parseInt(searchParams.get("offset") || "0", 10);
 
   const data = await listReelsAdmin({
-    query,
+    query: searchParams.get("q") || "",
     status,
-    dramaId: isNaN(dramaId as number) ? undefined : dramaId,
+    dramaId: dramaId !== undefined && !isNaN(dramaId) ? dramaId : undefined,
+    createdById: searchParams.get("mine") === "1" ? session.actorId : undefined,
     limit,
     offset,
     cursor: searchParams.get("cursor"),
@@ -27,21 +37,42 @@ export async function GET(req: NextRequest) {
 
   // videoUrl/thumbnailUrl stay as stored (they're what the edit form saves back);
   // the preview* fields are signed so private-bucket media plays in the console.
-  const sign = await getUrlSigner("reels", data.items.flatMap((r) => [r.videoUrl, r.thumbnailUrl || ""]));
+  const sign = await getUrlSigner(
+    "reels",
+    data.items.flatMap((r) => [
+      r.videoUrl,
+      r.thumbnailUrl || "",
+      r.pendingChanges?.videoUrl || "",
+      r.pendingChanges?.thumbnailUrl || "",
+    ])
+  );
   return NextResponse.json({
     ...data,
     items: data.items.map((r) => ({
       ...r,
+      permissions: reelPermissions(session, r),
       previewVideoUrl: sign(r.videoUrl),
       previewThumbnailUrl: r.thumbnailUrl ? sign(r.thumbnailUrl) : null,
+      pendingPreview: r.pendingChanges
+        ? {
+            videoUrl: r.pendingChanges.videoUrl ? sign(r.pendingChanges.videoUrl) : null,
+            thumbnailUrl: r.pendingChanges.thumbnailUrl ? sign(r.pendingChanges.thumbnailUrl) : null,
+          }
+        : null,
     })),
   });
 }
 
+/**
+ * POST /api/admin/reels
+ * Admin: creates the reel, published or not (`isPublished`).
+ * Moderator: always unpublished; `submitForReview: true` sends it for approval,
+ * otherwise it's saved as a draft.
+ */
 export async function POST(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
+  const { session } = auth;
 
   try {
     const body = await req.json();
@@ -58,6 +89,9 @@ export async function POST(req: NextRequest) {
       ? body.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
       : [];
 
+    const isModerator = session.role === "moderator";
+    const submit = isModerator && (body.submitForReview === true || body.isPublished === true);
+
     const reel = await createReelAdmin({
       title: body.title,
       synopsis: body.synopsis,
@@ -67,11 +101,24 @@ export async function POST(req: NextRequest) {
       dramaId: body.dramaId ? Number(body.dramaId) : null,
       episodeNumber: body.episodeNumber ? Number(body.episodeNumber) : null,
       tags,
-      isPublished: Boolean(body.isPublished),
+      isPublished: isModerator ? false : Boolean(body.isPublished),
+      createdBy: { id: session.actorId, name: session.displayName },
+      reviewStatus: isModerator ? (submit ? "pending" : "draft") : null,
     });
 
-    return NextResponse.json(reel);
-  } catch {
+    await logActivity(actorOf(session), {
+      action: isModerator ? (submit ? "reel.submitted" : "reel.drafted") : "reel.created",
+      entityType: "reel",
+      entityId: reel.reelId,
+      summary: isModerator
+        ? `${submit ? "Uploaded and submitted for approval" : "Uploaded as draft"}: "${reel.title}"`
+        : `Created reel "${reel.title}"${reel.isPublished ? " (published)" : " (draft)"}`,
+    });
+
+    const full = await getReelAdmin(reel.reelId);
+    return NextResponse.json(full ? { ...full, permissions: reelPermissions(session, full) } : reel);
+  } catch (err) {
+    console.error("Failed to create reel:", err);
     return NextResponse.json({ error: "Failed to create reel" }, { status: 500 });
   }
 }

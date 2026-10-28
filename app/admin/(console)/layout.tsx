@@ -1,8 +1,7 @@
 import React from "react";
 import Link from "next/link";
-import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { validateSessionToken } from "@/lib/auth";
+import { getStaffSessionFromCookies } from "@/lib/auth";
 import {
   LayoutDashboard,
   Tv2,
@@ -15,6 +14,9 @@ import {
   ShieldCheck,
   Flame,
   CloudCog,
+  UserCog,
+  History,
+  KeyRound,
 } from "lucide-react";
 
 export default async function AdminLayout({
@@ -22,22 +24,27 @@ export default async function AdminLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const cookieStore = await cookies();
-  const token = cookieStore.get("dramflix_admin_session")?.value;
-
-  if (!validateSessionToken(token)) {
+  // Checks the database too, so a disabled moderator is signed out right away.
+  const session = await getStaffSessionFromCookies();
+  if (!session) {
     redirect("/admin/login");
   }
+  const isAdmin = session.role === "admin";
 
-  const navItems = [
-    { label: "Overview", href: "/admin", icon: LayoutDashboard },
-    { label: "Dramas & Series", href: "/admin/dramas", icon: Tv2 },
-    { label: "Reels & Shorts", href: "/admin/reels", icon: Video },
-    { label: "Payouts & Redemptions", href: "/admin/payouts", icon: CreditCard },
-    { label: "Users & Economy", href: "/admin/users", icon: Users },
-    { label: "Transactions", href: "/admin/transactions", icon: Coins },
-    { label: "Storage & B2 Keys", href: "/admin/settings", icon: CloudCog },
-  ];
+  const navItems = isAdmin
+    ? [
+        { label: "Overview", href: "/admin", icon: LayoutDashboard },
+        { label: "Dramas & Series", href: "/admin/dramas", icon: Tv2 },
+        { label: "Reels & Shorts", href: "/admin/reels", icon: Video },
+        { label: "Payouts & Redemptions", href: "/admin/payouts", icon: CreditCard },
+        { label: "Users & Economy", href: "/admin/users", icon: Users },
+        { label: "Transactions", href: "/admin/transactions", icon: Coins },
+        { label: "Storage & B2 Keys", href: "/admin/settings", icon: CloudCog },
+        { label: "Team", href: "/admin/team", icon: UserCog },
+        { label: "Activity Log", href: "/admin/activity", icon: History },
+        { label: "My Account", href: "/admin/account", icon: KeyRound },
+      ]
+    : [{ label: "Reels & Shorts", href: "/admin/reels", icon: Video }];
 
   return (
     <div className="flex min-h-screen bg-[#090b10] text-[#e8ecf4] font-sans antialiased">
@@ -85,8 +92,8 @@ export default async function AdminLayout({
           <div className="flex items-center gap-3 px-3 py-2 rounded-xl bg-[#161c28]/60 border border-[#1f293d]">
             <ShieldCheck className="w-4 h-4 text-emerald-400" />
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-white truncate">Admin Root</p>
-              <p className="text-[10px] text-emerald-400 font-mono">Authenticated</p>
+              <p className="text-xs font-semibold text-white truncate">{session.displayName}</p>
+              <p className="text-[10px] text-emerald-400 font-mono">{isAdmin ? "Admin" : "Moderator"}</p>
             </div>
           </div>
 

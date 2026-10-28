@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
-import { isAuthenticatedAdmin } from "@/lib/auth";
+import { requireStaff } from "@/lib/auth";
+import { canUploadTo } from "@/lib/reelPermissions";
 import { B2_MIN_PART_BYTES, FolderType, b2StartLargeFile, getB2ConfigForFolder } from "@/lib/b2";
 import { createUploadSession } from "@/lib/db";
 
@@ -14,9 +15,9 @@ const MAX_CHUNKS = 10_000; // B2 large-file part limit
  * is kept in the database so any server instance can take any request.
  */
 export async function POST(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
+  const staff = auth.session;
 
   try {
     const body = await req.json();
@@ -29,10 +30,15 @@ export async function POST(req: NextRequest) {
     const targetName = typeof body?.targetName === "string" && body.targetName ? body.targetName : `item_${Date.now()}`;
     // uniqueName: prefix the stored file name so two uploads called "clip.mp4"
     // never overwrite each other (used by the reel uploader).
-    const uniqueName = body?.uniqueName === true;
+    // Moderators always get a unique name, so an upload can never replace the
+    // file behind a reel that is already live.
+    const uniqueName = body?.uniqueName === true || staff.role === "moderator";
 
     if (!fileName || !(fileSize > 0) || !FOLDER_TYPES.includes(folderType) || !Number.isInteger(totalChunks) || totalChunks < 1) {
       return NextResponse.json({ error: "Missing required initialization fields" }, { status: 400 });
+    }
+    if (!canUploadTo(staff, folderType)) {
+      return NextResponse.json({ error: "Moderators can only upload reels." }, { status: 403 });
     }
     if (totalChunks > MAX_CHUNKS || chunkSize > MAX_CHUNK_BYTES) {
       return NextResponse.json({ error: "File too large or chunk size too big" }, { status: 400 });

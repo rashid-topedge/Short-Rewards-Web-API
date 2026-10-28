@@ -1,8 +1,7 @@
 import React from "react";
 import Link from "next/link";
-import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { validateSessionToken } from "@/lib/auth";
+import { getStaffSessionFromCookies } from "@/lib/auth";
 import { getAdminDashboardStats } from "@/lib/db";
 import {
   Tv2,
@@ -23,11 +22,12 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function AdminDashboardPage() {
-  const cookieStore = await cookies();
-  const token = cookieStore.get("dramflix_admin_session")?.value;
-
-  if (!validateSessionToken(token)) {
+  const session = await getStaffSessionFromCookies();
+  if (!session) {
     redirect("/admin/login");
+  }
+  if (session.role !== "admin") {
+    redirect("/admin/reels");
   }
 
   const stats = await getAdminDashboardStats();

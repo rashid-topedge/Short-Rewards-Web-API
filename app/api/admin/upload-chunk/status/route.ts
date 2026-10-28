@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
+import { requireStaff } from "@/lib/auth";
+import { canUploadTo } from "@/lib/reelPermissions";
 import { getUploadSession, listUploadedChunks } from "@/lib/db";
 
 export async function GET(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
+  const staff = auth.session;
 
   const sessionId = new URL(req.url).searchParams.get("sessionId");
   if (!sessionId) {
@@ -16,6 +17,9 @@ export async function GET(req: NextRequest) {
     const session = await getUploadSession(sessionId);
     if (!session) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
+    if (!canUploadTo(staff, session.folderType)) {
+      return NextResponse.json({ error: "Moderators can only upload reels." }, { status: 403 });
     }
     return NextResponse.json({
       success: true,

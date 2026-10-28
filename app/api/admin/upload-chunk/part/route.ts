@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
+import { requireStaff } from "@/lib/auth";
+import { canUploadTo } from "@/lib/reelPermissions";
 import { FolderType, b2UploadPart, uploadBufferToB2 } from "@/lib/b2";
 import { getUploadSession, recordUploadPart } from "@/lib/db";
 
@@ -7,9 +8,9 @@ export const maxDuration = 300;
 
 /** Receives one chunk and forwards it straight to B2 (never touches local disk). */
 export async function POST(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
+  const staff = auth.session;
 
   try {
     const formData = await req.formData();
@@ -24,6 +25,9 @@ export async function POST(req: NextRequest) {
     const session = await getUploadSession(sessionId);
     if (!session) {
       return NextResponse.json({ error: "Upload session not found or expired" }, { status: 404 });
+    }
+    if (!canUploadTo(staff, session.folderType)) {
+      return NextResponse.json({ error: "Moderators can only upload reels." }, { status: 403 });
     }
     if (session.status !== "uploading") {
       return NextResponse.json({ error: `Upload session is ${session.status}` }, { status: 409 });

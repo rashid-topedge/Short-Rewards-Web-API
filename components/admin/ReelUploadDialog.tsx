@@ -67,11 +67,13 @@ type Props = {
   onClose: () => void;
   /** Called after one or more reels were saved, so the list can refresh. */
   onSaved: () => void;
+  /** Moderators can't publish: the switch becomes "Submit for approval". */
+  moderator?: boolean;
 };
 
 let keySeq = 0;
 
-export default function ReelUploadDialog({ open, onClose, onSaved }: Props) {
+export default function ReelUploadDialog({ open, onClose, onSaved, moderator = false }: Props) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const controllers = useRef(new Map<string, AbortController>());
@@ -271,7 +273,11 @@ export default function ReelUploadDialog({ open, onClose, onSaved }: Props) {
         if (!res.ok || !data.reelId) throw new Error(data.error || "Could not save the reel");
         savedSomething.current = true;
         patch(key, { save: { status: "saved", reelId: data.reelId } });
-        announce(`Reel "${d.title.trim()}" saved${d.isPublished ? " and published" : " as draft"}.`);
+        announce(
+          `Reel "${d.title.trim()}" saved${
+            d.isPublished ? (moderator ? " and sent for approval" : " and published") : " as draft"
+          }.`
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         patch(key, { save: { status: "error", error: message } });
@@ -491,7 +497,7 @@ export default function ReelUploadDialog({ open, onClose, onSaved }: Props) {
               <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_auto_auto] md:items-end">
                 <TextField label="Tags" value={batchTags} onChange={setBatchTags} placeholder="e.g. Romance, Revenge" />
                 <DramaPicker label="Linked drama" value={batchDrama} onChange={setBatchDrama} />
-                <PublishSwitch checked={batchPublished} onChange={setBatchPublished} />
+                <PublishSwitch checked={batchPublished} onChange={setBatchPublished} moderator={moderator} />
                 <button
                   type="button"
                   onClick={applyBatchDefaults}
@@ -517,6 +523,7 @@ export default function ReelUploadDialog({ open, onClose, onSaved }: Props) {
                   onRemove={() => removeItem(d.key)}
                   onRetry={() => retryItem(d.key)}
                   onThumb={(f) => setCustomThumb(d.key, f)}
+                  moderator={moderator}
                 />
               ))}
             </ol>
@@ -564,7 +571,9 @@ function ReelDraftCard({
   onRemove,
   onRetry,
   onThumb,
+  moderator,
 }: {
+  moderator: boolean;
   draft: ReelDraft;
   index: number;
   total: number;
@@ -688,13 +697,17 @@ function ReelDraftCard({
                 value={d.episodeNumber}
                 onChange={(v) => onChange({ episodeNumber: v.replace(/[^0-9]/g, "") })}
               />
-              <PublishSwitch checked={d.isPublished} onChange={(isPublished) => onChange({ isPublished })} />
+              <PublishSwitch
+                checked={d.isPublished}
+                onChange={(isPublished) => onChange({ isPublished })}
+                moderator={moderator}
+              />
             </div>
           </fieldset>
 
           {/* Actions */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#1e283b] pt-3">
-            <SaveStatus draft={d} />
+            <SaveStatus draft={d} moderator={moderator} />
             <div className="flex gap-2">
               {!saved && (
                 <button
@@ -782,12 +795,13 @@ function UploadStatus({ draft: d, progress, onRetry }: { draft: ReelDraft; progr
   );
 }
 
-function SaveStatus({ draft: d }: { draft: ReelDraft }) {
+function SaveStatus({ draft: d, moderator }: { draft: ReelDraft; moderator: boolean }) {
   if (d.save.status === "saved") {
     return (
       <p className="flex items-center gap-1.5 text-sm font-semibold text-emerald-300">
         <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-        Saved as reel #{d.save.reelId} {d.isPublished ? "(published)" : "(draft)"}
+        Saved as reel #{d.save.reelId}{" "}
+        {d.isPublished ? (moderator ? "(waiting for approval)" : "(published)") : "(draft)"}
       </p>
     );
   }
@@ -862,7 +876,16 @@ export function TextField({
   );
 }
 
-export function PublishSwitch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+export function PublishSwitch({
+  checked,
+  onChange,
+  moderator = false,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  /** Moderators submit for approval instead of publishing. */
+  moderator?: boolean;
+}) {
   const id = useId();
   return (
     <div className="flex h-11 items-center gap-3">
@@ -881,7 +904,7 @@ export function PublishSwitch({ checked, onChange }: { checked: boolean; onChang
         />
       </button>
       <label htmlFor={id} className="cursor-pointer select-none text-sm font-medium text-neutral-200">
-        {checked ? "Publish now" : "Save as draft"}
+        {checked ? (moderator ? "Submit for approval" : "Publish now") : "Save as draft"}
       </label>
     </div>
   );

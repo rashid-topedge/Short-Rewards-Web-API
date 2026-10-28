@@ -28,14 +28,17 @@ export default function AdminLoginPage() {
         body: JSON.stringify({ username, password }),
       });
 
-      const data = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { error?: string; redirectTo?: string };
       if (!res.ok) {
-        setError(data.error || "Invalid admin credentials");
+        setError(
+          data.error ||
+            (res.status >= 500 ? "The server couldn't sign you in right now. Please try again in a moment." : "Invalid username or password")
+        );
         setLoading(false);
         return;
       }
 
-      router.push("/admin");
+      router.push(typeof data.redirectTo === "string" ? data.redirectTo : "/admin");
       router.refresh();
     } catch {
       setError("Failed to connect to authentication server");
@@ -58,12 +61,12 @@ export default function AdminLoginPage() {
             DramaFlix Admin
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Sign in with admin credentials to manage dramas and user data
+            Sign in with your admin or moderator account
           </p>
         </div>
 
         {error && (
-          <div className="mb-6 p-3.5 bg-red-500/10 border border-red-500/30 rounded-xl flex items-center gap-3 text-red-400 text-xs">
+          <div role="alert" className="mb-6 p-3.5 bg-red-500/10 border border-red-500/30 rounded-xl flex items-center gap-3 text-red-400 text-xs">
             <ShieldAlert className="w-4 h-4 shrink-0" />
             <span>{error}</span>
           </div>
@@ -71,32 +74,38 @@ export default function AdminLoginPage() {
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+            <label htmlFor="admin-username" className="block text-xs font-semibold text-slate-300 mb-1.5">
               Username
             </label>
             <div className="relative">
               <User className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
+                id="admin-username"
                 type="text"
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="admin"
+                placeholder="Your username"
                 className="w-full bg-[#161D2E] border border-white/10 focus:border-purple-500 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 outline-none transition"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+            <label htmlFor="admin-password" className="block text-xs font-semibold text-slate-300 mb-1.5">
               Password
             </label>
             <div className="relative">
               <Lock className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
+                id="admin-password"
+                autoComplete="current-password"
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="********"
+                placeholder="Your password"
                 className="w-full bg-[#161D2E] border border-white/10 focus:border-purple-500 rounded-xl pl-10 pr-10 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 outline-none transition"
               />
               <button
@@ -128,11 +137,9 @@ export default function AdminLoginPage() {
           </div>
         </form>
 
-        <div className="mt-6 text-center">
-          <p className="text-[11px] text-slate-500">
-            Default credentials: <span className="text-slate-300 font-mono">admin</span> / <span className="text-slate-300 font-mono">admin123</span>
-          </p>
-        </div>
+        <p className="mt-6 text-center text-[11px] text-slate-500">
+          Forgot your password? Ask the admin to reset it on the Team page.
+        </p>
       </div>
     </div>
   );

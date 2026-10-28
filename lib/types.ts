@@ -58,6 +58,75 @@ export type ReelItem = {
   updatedAt: number;
 };
 
+/** Fields a moderator may change on a reel (also the shape of pending changes). */
+export type ReelChanges = {
+  title?: string;
+  synopsis?: string | null;
+  tags?: string[];
+  videoUrl?: string;
+  thumbnailUrl?: string | null;
+  durationSeconds?: number;
+  dramaId?: number | null;
+  episodeNumber?: number | null;
+};
+
+/** null = admin-managed/approved; otherwise a moderator reel's review state. */
+export type ReelReviewStatus = "draft" | "pending" | "rejected" | null;
+
+/** What the signed-in staff member may do with a reel (computed by the server). */
+export type ReelPermissions = {
+  canEdit: boolean;
+  canDelete: boolean;
+  /** Admin: publish/unpublish freely. */
+  canTogglePublish: boolean;
+  /** Moderator: hide own live reel. */
+  canUnpublish: boolean;
+  /** Moderator: send own draft/rejected reel for approval. */
+  canSubmit: boolean;
+  /** Admin: approve/reject a pending reel or pending changes. */
+  canReview: boolean;
+};
+
+/** A reel as the admin console sees it. */
+export type AdminReelItem = ReelItem & {
+  createdById: string | null;
+  createdByName: string | null;
+  updatedByName: string | null;
+  reviewStatus: ReelReviewStatus;
+  reviewNote: string | null;
+  firstPublishedAt: number | null;
+  pendingChanges: ReelChanges | null;
+  pendingByName: string | null;
+  pendingAt: number | null;
+  permissions?: ReelPermissions;
+  previewVideoUrl?: string;
+  previewThumbnailUrl?: string | null;
+  /** Signed preview links for a proposed new video/thumbnail. */
+  pendingPreview?: { videoUrl: string | null; thumbnailUrl: string | null } | null;
+};
+
+export type StaffAccountInfo = {
+  id: number;
+  username: string;
+  displayName: string;
+  disabled: boolean;
+  createdAt: number;
+  lastLoginAt: number | null;
+};
+
+export type ActivityEntry = {
+  id: number;
+  actorId: string;
+  actorName: string;
+  actorRole: string;
+  action: string;
+  entityType: string;
+  entityId: string | null;
+  summary: string;
+  details: Record<string, unknown> | null;
+  createdAt: number;
+};
+
 export type ReelListResponse = {
   limit: number;
   nextCursor: string | null;

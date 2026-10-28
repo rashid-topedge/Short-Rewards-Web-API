@@ -10,8 +10,12 @@ import type {
   RewardResult,
   StreakDayInfo,
   AdminDashboardStats,
+  AdminReelItem,
+  ReelChanges,
+  ReelReviewStatus,
+  StaffAccountInfo,
+  ActivityEntry,
   ReelItem,
-  ReelListResponse,
   RedemptionRequest,
   RedemptionStatus,
   SystemSettings,
@@ -98,6 +102,16 @@ interface ReelRow {
   is_published: number;
   created_at: number;
   updated_at: number;
+  // admin-only columns (present when selected with REEL_ADMIN_COLUMNS)
+  created_by_id?: string | null;
+  created_by_name?: string | null;
+  updated_by_name?: string | null;
+  review_status?: string | null;
+  review_note?: string | null;
+  first_published_at?: number | null;
+  pending_changes_json?: string | null;
+  pending_by_name?: string | null;
+  pending_at?: number | null;
 }
 
 interface UserRow {
@@ -209,7 +223,7 @@ async function initDb(): Promise<DbApi> {
 
 // Bump this whenever `statements` below changes. On a cold start we read one
 // row instead of re-running ~40 DDL statements against Turso.
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 10;
 
 async function createSchema(db: QueryApi): Promise<void> {
   await db.run(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
@@ -366,6 +380,53 @@ async function createSchema(db: QueryApi): Promise<void> {
       PRIMARY KEY (user_id, claim_id)
     )`,
     `CREATE INDEX IF NOT EXISTS idx_claim_keys_created ON reward_claim_keys (created_at)`,
+    // ---- v10: console settings kept in the database (session-signing secret)
+    `CREATE TABLE IF NOT EXISTS admin_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at REAL NOT NULL
+    )`,
+    // ---- v9: moderators, reel ownership & review, activity log
+    `CREATE TABLE IF NOT EXISTS admin_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      display_name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'moderator',
+      disabled INTEGER NOT NULL DEFAULT 0,
+      session_version INTEGER NOT NULL DEFAULT 0,
+      created_at REAL NOT NULL,
+      updated_at REAL NOT NULL,
+      last_login_at REAL
+    )`,
+    `ALTER TABLE reels ADD COLUMN created_by_id TEXT`,
+    `ALTER TABLE reels ADD COLUMN created_by_name TEXT`,
+    `ALTER TABLE reels ADD COLUMN updated_by_name TEXT`,
+    // NULL = normal (admin-managed / approved); 'draft' | 'pending' | 'rejected' for moderator reels
+    `ALTER TABLE reels ADD COLUMN review_status TEXT`,
+    `ALTER TABLE reels ADD COLUMN review_note TEXT`,
+    `ALTER TABLE reels ADD COLUMN first_published_at REAL`,
+    // Edits a moderator made to a live reel, waiting for approval (the live row is unchanged).
+    `ALTER TABLE reels ADD COLUMN pending_changes_json TEXT`,
+    `ALTER TABLE reels ADD COLUMN pending_by_name TEXT`,
+    `ALTER TABLE reels ADD COLUMN pending_at REAL`,
+    `UPDATE reels SET first_published_at = COALESCE(updated_at, created_at) WHERE is_published = 1 AND first_published_at IS NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_reels_review ON reels (review_status)`,
+    `CREATE INDEX IF NOT EXISTS idx_reels_owner ON reels (created_by_id, reel_id DESC)`,
+    `CREATE TABLE IF NOT EXISTS admin_activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor_id TEXT NOT NULL,
+      actor_name TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT,
+      summary TEXT NOT NULL,
+      details_json TEXT,
+      created_at REAL NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_activity_created ON admin_activity (created_at DESC, id DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_activity_actor ON admin_activity (actor_id, created_at DESC, id DESC)`,
     // One row per (user, drama, episode) reward; the primary key makes double-claims impossible.
     // Per-user, per-day reward counters (day = server-side date in APP_TIMEZONE).
     `CREATE TABLE IF NOT EXISTS user_daily_reward_counts (
@@ -475,6 +536,32 @@ function mapReelItem(row: ReelRow): ReelItem {
     isPublished: Boolean(row.is_published),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function parseReelChanges(raw: string | null | undefined): ReelChanges | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" ? (v as ReelChanges) : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapAdminReelItem(row: ReelRow): AdminReelItem {
+  const status = row.review_status;
+  return {
+    ...mapReelItem(row),
+    createdById: row.created_by_id ?? null,
+    createdByName: row.created_by_name ?? null,
+    updatedByName: row.updated_by_name ?? null,
+    reviewStatus: status === "draft" || status === "pending" || status === "rejected" ? status : null,
+    reviewNote: row.review_note ?? null,
+    firstPublishedAt: row.first_published_at ?? null,
+    pendingChanges: parseReelChanges(row.pending_changes_json),
+    pendingByName: row.pending_by_name ?? null,
+    pendingAt: row.pending_at ?? null,
   };
 }
 
@@ -713,6 +800,11 @@ const REEL_COLUMNS = `
     r.reel_id, r.title, r.synopsis, r.video_url, r.thumbnail_url, r.duration_seconds,
     r.drama_id, d.title as drama_title, r.episode_number, r.tags_json, r.view_count,
     r.like_count, r.is_published, r.created_at, r.updated_at`;
+
+/** REEL_COLUMNS plus ownership/review fields; admin console only (never the public API). */
+const REEL_ADMIN_COLUMNS = `${REEL_COLUMNS},
+    r.created_by_id, r.created_by_name, r.updated_by_name, r.review_status, r.review_note,
+    r.first_published_at, r.pending_changes_json, r.pending_by_name, r.pending_at`;
 
 /**
  * Public reel feed.
@@ -2264,12 +2356,15 @@ export async function deleteEpisodeAdmin(dramaId: number, ep: number): Promise<E
 
 export async function listReelsAdmin(options: {
   query?: string;
-  status?: "all" | "published" | "draft";
+  /** "pending" = waiting for approval (new reels or pending changes). */
+  status?: "all" | "published" | "draft" | "pending";
   dramaId?: number;
+  /** Only reels created by this staff member (e.g. "mod:3"). */
+  createdById?: string;
   limit?: number;
   offset?: number;
   cursor?: string | null;
-}): Promise<AdminPage<ReelItem>> {
+}): Promise<AdminPage<AdminReelItem>> {
   const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
   const offset = Math.max(0, options.offset ?? 0);
   const query = options.query?.trim();
@@ -2282,14 +2377,19 @@ export async function listReelsAdmin(options: {
   }
   if (status === "published") where.push("r.is_published = 1");
   else if (status === "draft") where.push("r.is_published = 0");
+  else if (status === "pending") where.push("(r.review_status = 'pending' OR r.pending_changes_json IS NOT NULL)");
   if (options.dramaId) {
     where.push("r.drama_id = ?");
     params.push(options.dramaId);
   }
+  if (options.createdById) {
+    where.push("r.created_by_id = ?");
+    params.push(options.createdById);
+  }
 
   const { total, rows, nextCursor } = await keysetPage<ReelRow>({
     table: "reels",
-    select: `SELECT ${REEL_COLUMNS} FROM reels r LEFT JOIN dramas d ON r.drama_id = d.drama_id`,
+    select: `SELECT ${REEL_ADMIN_COLUMNS} FROM reels r LEFT JOIN dramas d ON r.drama_id = d.drama_id`,
     from: "FROM reels r LEFT JOIN dramas d ON r.drama_id = d.drama_id",
     where,
     params,
@@ -2299,7 +2399,25 @@ export async function listReelsAdmin(options: {
     offset,
     cursor: options.cursor,
   });
-  return { total, limit, offset, nextCursor, items: rows.map(mapReelItem) };
+  return { total, limit, offset, nextCursor, items: rows.map(mapAdminReelItem) };
+}
+
+export async function getReelAdmin(reelId: number): Promise<AdminReelItem | null> {
+  const db = await getDb();
+  const row = (await db.get(
+    `SELECT ${REEL_ADMIN_COLUMNS} FROM reels r LEFT JOIN dramas d ON r.drama_id = d.drama_id WHERE r.reel_id = ?`,
+    [reelId]
+  )) as ReelRow | undefined;
+  return row ? mapAdminReelItem(row) : null;
+}
+
+/** Number of reels waiting for approval (new reels + pending changes). */
+export async function countPendingReviews(): Promise<number> {
+  const db = await getDb();
+  const row = (await db.get(
+    "SELECT COUNT(*) AS n FROM reels WHERE review_status = 'pending' OR pending_changes_json IS NOT NULL"
+  )) as { n: number };
+  return row.n;
 }
 
 
@@ -2313,6 +2431,10 @@ export async function createReelAdmin(data: {
   episodeNumber?: number | null;
   tags?: string[];
   isPublished?: boolean;
+  /** Who created it (staff actor id + display name). */
+  createdBy?: { id: string; name: string };
+  /** Moderator reels start as 'draft' or 'pending' (never published directly). */
+  reviewStatus?: ReelReviewStatus;
 }): Promise<ReelItem> {
   invalidateCounts("reels");
   const db = await getDb();
@@ -2325,9 +2447,10 @@ export async function createReelAdmin(data: {
       INSERT INTO reels (
         title, synopsis, video_url, thumbnail_url, duration_seconds,
         drama_id, episode_number, tags_json, view_count, like_count,
-        is_published, created_at, updated_at
+        is_published, created_at, updated_at,
+        created_by_id, created_by_name, updated_by_name, review_status, first_published_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       data.title.trim(),
@@ -2341,6 +2464,11 @@ export async function createReelAdmin(data: {
       pubVal,
       now,
       now,
+      data.createdBy?.id ?? null,
+      data.createdBy?.name ?? null,
+      data.createdBy?.name ?? null,
+      data.reviewStatus ?? null,
+      pubVal ? now : null,
     ]
   );
 
@@ -2368,7 +2496,8 @@ export async function updateReelAdmin(
     isPublished?: boolean;
     viewCount?: number;
     likeCount?: number;
-  }
+  },
+  editor?: { name: string }
 ): Promise<ReelItem | null> {
   invalidateCounts("reels");
   const db = await getDb();
@@ -2413,6 +2542,15 @@ export async function updateReelAdmin(
   if (data.isPublished !== undefined) {
     updates.push("is_published = ?");
     params.push(data.isPublished ? 1 : 0);
+    if (data.isPublished) {
+      // An admin publishing a reel also approves it.
+      updates.push("first_published_at = COALESCE(first_published_at, ?)", "review_status = NULL", "review_note = NULL");
+      params.push(Date.now());
+    }
+  }
+  if (editor) {
+    updates.push("updated_by_name = ?");
+    params.push(editor.name);
   }
   if (data.viewCount !== undefined) {
     updates.push("view_count = ?");
@@ -2460,13 +2598,15 @@ export async function bulkUpdateReelsPublish(
   invalidateCounts("reels");
   const db = await getDb();
   const placeholders = reelIds.map(() => "?").join(",");
-  const pubVal = isPublished ? 1 : 0;
-
+  const now = Date.now();
   await db.run(
-    `UPDATE reels
-     SET is_published = ?, updated_at = ?
-     WHERE reel_id IN (${placeholders})`,
-    [pubVal, Date.now(), ...reelIds]
+    isPublished
+      ? `UPDATE reels
+         SET is_published = 1, updated_at = ?, first_published_at = COALESCE(first_published_at, ?),
+             review_status = NULL, review_note = NULL
+         WHERE reel_id IN (${placeholders})`
+      : `UPDATE reels SET is_published = 0, updated_at = ? WHERE reel_id IN (${placeholders})`,
+    isPublished ? [now, now, ...reelIds] : [now, ...reelIds]
   );
 
   return reelIds.length;
@@ -3212,5 +3352,609 @@ export async function listUserTransactions(
       createdAt: t.created_at,
     })),
     nextCursor: rows.length > limit && last ? encodeCursor([last.created_at, last.id]) : null,
+  };
+}
+
+// ==========================================
+// STAFF ACCOUNTS (moderators)
+// ==========================================
+
+export type StaffAccount = StaffAccountInfo & {
+  role: "admin" | "moderator";
+  passwordHash: string;
+  sessionVersion: number;
+};
+
+interface AdminUserRow {
+  id: number;
+  username: string;
+  display_name: string;
+  role: string;
+  password_hash: string;
+  disabled: number;
+  session_version: number;
+  created_at: number;
+  last_login_at: number | null;
+}
+
+function mapStaffAccount(r: AdminUserRow): StaffAccount {
+  return {
+    id: r.id,
+    username: r.username,
+    displayName: r.display_name,
+    disabled: Boolean(r.disabled),
+    createdAt: r.created_at,
+    lastLoginAt: r.last_login_at,
+    role: r.role === "admin" ? "admin" : "moderator",
+    passwordHash: r.password_hash,
+    sessionVersion: r.session_version,
+  };
+}
+
+export async function getStaffAccount(id: number): Promise<StaffAccount | null> {
+  const db = await getDb();
+  const row = (await db.get("SELECT * FROM admin_users WHERE id = ?", [id])) as AdminUserRow | undefined;
+  return row ? mapStaffAccount(row) : null;
+}
+
+export async function getStaffAccountByUsername(username: string): Promise<StaffAccount | null> {
+  const db = await getDb();
+  const row = (await db.get("SELECT * FROM admin_users WHERE username = ? COLLATE NOCASE", [username])) as
+    | AdminUserRow
+    | undefined;
+  return row ? mapStaffAccount(row) : null;
+}
+
+/** The main admin account (role 'admin'), or null if none has been set up yet. */
+export async function getAdminAccount(): Promise<StaffAccount | null> {
+  const db = await getDb();
+  const row = (await db.get("SELECT * FROM admin_users WHERE role = 'admin' ORDER BY id LIMIT 1")) as
+    | AdminUserRow
+    | undefined;
+  return row ? mapStaffAccount(row) : null;
+}
+
+/**
+ * Creates the admin account, only if there is none yet (safe if several
+ * server instances try at once). Returns false if an admin already exists or
+ * the username belongs to a moderator.
+ */
+export async function createAdminAccountIfMissing(input: {
+  username: string;
+  displayName: string;
+  passwordHash: string;
+}): Promise<boolean> {
+  const db = await getDb();
+  const now = Date.now();
+  const res = await db.run(
+    `INSERT INTO admin_users (username, display_name, password_hash, role, created_at, updated_at)
+     SELECT ?, ?, ?, 'admin', ?, ?
+     WHERE NOT EXISTS (SELECT 1 FROM admin_users WHERE role = 'admin')
+     ON CONFLICT(username) DO NOTHING`,
+    [input.username, input.displayName, input.passwordHash, now, now]
+  );
+  return res.changes === 1;
+}
+
+/**
+ * Admin changes their own sign-in. A new password signs out their other sessions.
+ */
+export async function updateAdminCredentials(
+  id: number,
+  changes: { username?: string; displayName?: string; passwordHash?: string }
+): Promise<{ ok: true } | { ok: false; reason: "taken" | "not_found" }> {
+  const db = await getDb();
+  const sets: string[] = ["updated_at = ?"];
+  const params: InValue[] = [Date.now()];
+  if (changes.username !== undefined) {
+    sets.push("username = ?");
+    params.push(changes.username);
+  }
+  if (changes.displayName !== undefined) {
+    sets.push("display_name = ?");
+    params.push(changes.displayName);
+  }
+  if (changes.passwordHash !== undefined) {
+    sets.push("password_hash = ?", "session_version = session_version + 1");
+    params.push(changes.passwordHash);
+  }
+  try {
+    const res = await db.run(`UPDATE admin_users SET ${sets.join(", ")} WHERE id = ? AND role = 'admin'`, [...params, id]);
+    return res.changes === 1 ? { ok: true } : { ok: false, reason: "not_found" };
+  } catch (err) {
+    if (/UNIQUE|constraint/i.test(err instanceof Error ? err.message : String(err))) return { ok: false, reason: "taken" };
+    throw err;
+  }
+}
+
+// Console settings stored in the database (admin_config), e.g. the session secret.
+export async function getAdminConfig(key: string): Promise<string | null> {
+  const db = await getDb();
+  const row = (await db.get("SELECT value FROM admin_config WHERE key = ?", [key])) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+/** Sets the value only if the key doesn't exist yet; returns the stored value either way. */
+export async function initAdminConfig(key: string, value: string): Promise<string> {
+  const db = await getDb();
+  await db.run(
+    "INSERT INTO admin_config (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING",
+    [key, value, Date.now()]
+  );
+  return (await getAdminConfig(key)) ?? value;
+}
+
+export async function setAdminConfig(key: string, value: string): Promise<void> {
+  const db = await getDb();
+  await db.run(
+    `INSERT INTO admin_config (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [key, value, Date.now()]
+  );
+}
+
+export async function recordStaffLogin(id: number): Promise<void> {
+  const db = await getDb();
+  await db.run("UPDATE admin_users SET last_login_at = ? WHERE id = ?", [Date.now(), id]);
+}
+
+export async function listStaffAccounts(): Promise<StaffAccountInfo[]> {
+  const db = await getDb();
+  const rows = (await db.all("SELECT * FROM admin_users WHERE role = 'moderator' ORDER BY disabled ASC, username COLLATE NOCASE ASC")) as AdminUserRow[];
+  return rows.map((r) => {
+    const { passwordHash: _hash, sessionVersion: _ver, role: _role, ...info } = mapStaffAccount(r);
+    void _hash;
+    void _ver;
+    void _role;
+    return info;
+  });
+}
+
+export async function createStaffAccount(input: {
+  username: string;
+  displayName: string;
+  passwordHash: string;
+}): Promise<{ ok: true; id: number } | { ok: false; reason: "taken" }> {
+  const db = await getDb();
+  const now = Date.now();
+  const res = await db.run(
+    `INSERT INTO admin_users (username, display_name, password_hash, role, created_at, updated_at)
+     VALUES (?, ?, ?, 'moderator', ?, ?)
+     ON CONFLICT(username) DO NOTHING`,
+    [input.username, input.displayName, input.passwordHash, now, now]
+  );
+  if (res.changes !== 1) return { ok: false, reason: "taken" };
+  return { ok: true, id: Number(res.lastInsertRowid) };
+}
+
+/** Changing the password or disabling signs the moderator out everywhere (session_version + 1). */
+export async function updateStaffAccount(
+  id: number,
+  changes: { displayName?: string; passwordHash?: string; disabled?: boolean }
+): Promise<boolean> {
+  const db = await getDb();
+  const sets: string[] = ["updated_at = ?"];
+  const params: InValue[] = [Date.now()];
+  if (changes.displayName !== undefined) {
+    sets.push("display_name = ?");
+    params.push(changes.displayName);
+  }
+  if (changes.passwordHash !== undefined) {
+    sets.push("password_hash = ?");
+    params.push(changes.passwordHash);
+  }
+  if (changes.disabled !== undefined) {
+    sets.push("disabled = ?");
+    params.push(changes.disabled ? 1 : 0);
+  }
+  if (changes.passwordHash !== undefined || changes.disabled === true) {
+    sets.push("session_version = session_version + 1");
+  }
+  params.push(id);
+  // Team-page changes only ever touch moderator accounts.
+  const res = await db.run(`UPDATE admin_users SET ${sets.join(", ")} WHERE id = ? AND role = 'moderator'`, params);
+  return res.changes === 1;
+}
+
+/** Removes the login. Their reels stay, still showing who uploaded them. */
+export async function deleteStaffAccount(id: number): Promise<boolean> {
+  const db = await getDb();
+  const res = await db.run("DELETE FROM admin_users WHERE id = ? AND role = 'moderator'", [id]);
+  return res.changes === 1;
+}
+
+// ==========================================
+// ACTIVITY LOG
+// ==========================================
+
+export type ActivityActor = { actorId: string; displayName: string; role: string };
+
+export async function logActivity(
+  actor: ActivityActor,
+  entry: {
+    action: string;
+    entityType: string;
+    entityId?: string | number | null;
+    summary: string;
+    details?: Record<string, unknown> | null;
+  }
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
+    `INSERT INTO admin_activity (actor_id, actor_name, actor_role, action, entity_type, entity_id, summary, details_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      actor.actorId,
+      actor.displayName,
+      actor.role,
+      entry.action,
+      entry.entityType,
+      entry.entityId === undefined || entry.entityId === null ? null : String(entry.entityId),
+      entry.summary,
+      entry.details ? JSON.stringify(entry.details) : null,
+      Date.now(),
+    ]
+  );
+}
+
+export async function listActivity(options: {
+  cursor?: string | null;
+  limit?: number;
+  actorId?: string;
+  entityType?: string;
+  entityId?: string;
+}): Promise<{ items: ActivityEntry[]; nextCursor: string | null }> {
+  const db = await getDb();
+  const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+  const where: string[] = [];
+  const params: InValue[] = [];
+  if (options.actorId) {
+    where.push("actor_id = ?");
+    params.push(options.actorId);
+  }
+  if (options.entityType) {
+    where.push("entity_type = ?");
+    params.push(options.entityType);
+  }
+  if (options.entityId) {
+    where.push("entity_id = ?");
+    params.push(options.entityId);
+  }
+  const after = decodeCursor(options.cursor, 2);
+  if (after) {
+    where.push("(created_at < ? OR (created_at = ? AND id < ?))");
+    params.push(after[0], after[0], after[1]);
+  }
+  params.push(limit + 1);
+  const rows = (await db.all(
+    `SELECT * FROM admin_activity ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+     ORDER BY created_at DESC, id DESC LIMIT ?`,
+    params
+  )) as {
+    id: number;
+    actor_id: string;
+    actor_name: string;
+    actor_role: string;
+    action: string;
+    entity_type: string;
+    entity_id: string | null;
+    summary: string;
+    details_json: string | null;
+    created_at: number;
+  }[];
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map((r) => {
+      let details: Record<string, unknown> | null = null;
+      try {
+        details = r.details_json ? JSON.parse(r.details_json) : null;
+      } catch {
+        details = null;
+      }
+      return {
+        id: r.id,
+        actorId: r.actor_id,
+        actorName: r.actor_name,
+        actorRole: r.actor_role,
+        action: r.action,
+        entityType: r.entity_type,
+        entityId: r.entity_id,
+        summary: r.summary,
+        details,
+        createdAt: r.created_at,
+      };
+    }),
+    nextCursor: rows.length > limit && last ? encodeCursor([last.created_at, last.id]) : null,
+  };
+}
+
+// ==========================================
+// REEL MODERATION
+// ==========================================
+// Moderators work only on reels they created (created_by_id). They never
+// publish: new reels go 'draft' → 'pending' → (admin) published or 'rejected'.
+// Edits to a live reel are stored as pending_changes_json and only reach the
+// live row when an admin approves them.
+
+/** Maps ReelChanges to SQL assignments on the reels table. */
+function reelChangeAssignments(changes: ReelChanges): { sets: string[]; params: InValue[] } {
+  const sets: string[] = [];
+  const params: InValue[] = [];
+  if (changes.title !== undefined) {
+    sets.push("title = ?");
+    params.push(changes.title.trim());
+  }
+  if (changes.synopsis !== undefined) {
+    sets.push("synopsis = ?");
+    params.push(changes.synopsis?.trim() || null);
+  }
+  if (changes.tags !== undefined) {
+    sets.push("tags_json = ?");
+    params.push(JSON.stringify(changes.tags));
+  }
+  if (changes.videoUrl !== undefined) {
+    sets.push("video_url = ?");
+    params.push(changes.videoUrl.trim());
+  }
+  if (changes.thumbnailUrl !== undefined) {
+    sets.push("thumbnail_url = ?");
+    params.push(changes.thumbnailUrl?.trim() || null);
+  }
+  if (changes.durationSeconds !== undefined) {
+    sets.push("duration_seconds = ?");
+    params.push(changes.durationSeconds);
+  }
+  if (changes.dramaId !== undefined) {
+    sets.push("drama_id = ?");
+    params.push(changes.dramaId || null);
+  }
+  if (changes.episodeNumber !== undefined) {
+    sets.push("episode_number = ?");
+    params.push(changes.episodeNumber || null);
+  }
+  return { sets, params };
+}
+
+/** Files that stop being used when `changes` replace the reel's current video/thumbnail. */
+function filesReplacedBy(row: { video_url: string; thumbnail_url: string | null }, changes: ReelChanges): string[] {
+  const out: string[] = [];
+  if (changes.videoUrl !== undefined && changes.videoUrl.trim() !== row.video_url) out.push(row.video_url);
+  if (changes.thumbnailUrl !== undefined && (changes.thumbnailUrl?.trim() || null) !== (row.thumbnail_url ?? null)) {
+    if (row.thumbnail_url) out.push(row.thumbnail_url);
+  }
+  return out;
+}
+
+export type ModeratorEditResult =
+  | { ok: true; mode: "applied" | "pending-changes"; reel: AdminReelItem }
+  | { ok: false; reason: "not_found" | "not_owner" };
+
+/**
+ * A moderator edits one of their own reels.
+ * - Not live: changes apply directly. `submit` sends it for approval
+ *   (a rejected reel goes back to draft until submitted again).
+ * - Live: changes are stored as pending (merged with any earlier pending
+ *   changes); the live version is untouched until an admin approves.
+ * - `unpublish` hides a live reel: it becomes a draft (pending changes are
+ *   folded in), and needs approval to go live again.
+ */
+export async function moderatorEditReel(
+  reelId: number,
+  actor: { actorId: string; displayName: string },
+  changes: ReelChanges,
+  opts: { submit?: boolean; unpublish?: boolean } = {}
+): Promise<ModeratorEditResult> {
+  invalidateCounts("reels");
+  const db = await getDb();
+  const now = Date.now();
+
+  const outcome = await db.tx(async (tx) => {
+    const row = (await tx.get(
+      `SELECT reel_id, title, synopsis, tags_json, video_url, thumbnail_url, duration_seconds, drama_id, episode_number,
+              is_published, created_by_id, review_status, pending_changes_json
+       FROM reels WHERE reel_id = ?`,
+      [reelId]
+    )) as
+      | {
+          reel_id: number;
+          title: string;
+          synopsis: string | null;
+          tags_json: string | null;
+          video_url: string;
+          thumbnail_url: string | null;
+          duration_seconds: number | null;
+          drama_id: number | null;
+          episode_number: number | null;
+          is_published: number;
+          created_by_id: string | null;
+          review_status: string | null;
+          pending_changes_json: string | null;
+        }
+      | undefined;
+    if (!row) return { ok: false as const, reason: "not_found" as const };
+    if (row.created_by_id !== actor.actorId) return { ok: false as const, reason: "not_owner" as const };
+
+    const hasChanges = Object.keys(changes).length > 0;
+
+    if (row.is_published && !opts.unpublish) {
+      if (!hasChanges) return { ok: true as const, mode: "applied" as const, replaced: [] as string[] };
+      const before = parseReelChanges(row.pending_changes_json) ?? {};
+      const merged: ReelChanges = { ...before, ...changes };
+      // Keep only what actually differs from the live version (the edit form
+      // sends every field; a field changed back to its live value drops out).
+      const live: Required<ReelChanges> = {
+        title: row.title,
+        synopsis: row.synopsis ?? null,
+        tags: row.tags_json ? (JSON.parse(row.tags_json) as string[]) : [],
+        videoUrl: row.video_url,
+        thumbnailUrl: row.thumbnail_url ?? null,
+        durationSeconds: row.duration_seconds ?? 0,
+        dramaId: row.drama_id ?? null,
+        episodeNumber: row.episode_number ?? null,
+      };
+      const norm = (k: keyof ReelChanges, v: unknown) =>
+        JSON.stringify(typeof v === "string" ? v.trim() || (k === "synopsis" || k === "thumbnailUrl" ? null : "") : v ?? null);
+      for (const k of Object.keys(merged) as (keyof ReelChanges)[]) {
+        if (norm(k, merged[k]) === norm(k, live[k])) delete merged[k];
+      }
+      // An earlier proposed upload that is now replaced (or dropped) is unused.
+      const unused: string[] = [];
+      for (const k of ["videoUrl", "thumbnailUrl"] as const) {
+        const old = before[k];
+        if (old && old !== merged[k] && old !== live[k]) unused.push(old);
+      }
+      const hasPending = Object.keys(merged).length > 0;
+      await tx.run(
+        `UPDATE reels SET pending_changes_json = ?, pending_by_name = ?, pending_at = ?, review_note = NULL WHERE reel_id = ?`,
+        hasPending ? [JSON.stringify(merged), actor.displayName, now, reelId] : [null, null, null, reelId]
+      );
+      return {
+        ok: true as const,
+        mode: hasPending ? ("pending-changes" as const) : ("applied" as const),
+        replaced: unused,
+      };
+    }
+
+    // Not live (or being unpublished now): apply directly, folding in any pending changes.
+    const all: ReelChanges = { ...(parseReelChanges(row.pending_changes_json) ?? {}), ...changes };
+    const { sets, params } = reelChangeAssignments(all);
+    let status = row.review_status;
+    if (opts.unpublish && row.is_published) status = "draft";
+    if (opts.submit) status = "pending";
+    else if (status === "rejected" && hasChanges) status = "draft";
+    else if (!status) status = "draft";
+    sets.push(
+      "is_published = 0",
+      "review_status = ?",
+      "updated_by_name = ?",
+      "updated_at = ?",
+      "pending_changes_json = NULL",
+      "pending_by_name = NULL",
+      "pending_at = NULL"
+    );
+    params.push(status, actor.displayName, now);
+    if (opts.submit) sets.push("review_note = NULL");
+    await tx.run(`UPDATE reels SET ${sets.join(", ")} WHERE reel_id = ?`, [...params, reelId]);
+    return { ok: true as const, mode: "applied" as const, replaced: filesReplacedBy(row, all) };
+  });
+
+  if (!outcome.ok) return outcome;
+  if (outcome.replaced.length) await enqueueFileDeletes(db, "reels", outcome.replaced);
+  const reel = await getReelAdmin(reelId);
+  return { ok: true, mode: outcome.mode, reel: reel! };
+}
+
+/** A moderator deletes their own reel; only if it was never published. */
+export async function moderatorDeleteReel(
+  reelId: number,
+  actorId: string
+): Promise<{ ok: true } | { ok: false; reason: "not_found" | "not_owner" | "was_published" }> {
+  const db = await getDb();
+  const row = (await db.get("SELECT created_by_id, is_published, first_published_at FROM reels WHERE reel_id = ?", [
+    reelId,
+  ])) as { created_by_id: string | null; is_published: number; first_published_at: number | null } | undefined;
+  if (!row) return { ok: false, reason: "not_found" };
+  if (row.created_by_id !== actorId) return { ok: false, reason: "not_owner" };
+  if (row.is_published || row.first_published_at) return { ok: false, reason: "was_published" };
+  await deleteReelAdmin(reelId);
+  return { ok: true };
+}
+
+export type ReviewResult =
+  | { ok: true; kind: "new-reel" | "changes"; decision: "approved" | "rejected"; reel: AdminReelItem }
+  | { ok: false; reason: "not_found" | "nothing_to_review" };
+
+/**
+ * Admin approves or rejects a reel waiting for review:
+ * - a new/unpublished reel (review_status 'pending'): approve publishes it;
+ *   reject marks it 'rejected' with the note.
+ * - pending changes to a live reel: approve applies them (replaced files are
+ *   queued for deletion); reject discards them (newly uploaded files queued
+ *   for deletion) and leaves the note for the moderator.
+ */
+export async function reviewReel(
+  reelId: number,
+  admin: { displayName: string },
+  decision: "approve" | "reject",
+  note?: string
+): Promise<ReviewResult> {
+  invalidateCounts("reels");
+  const db = await getDb();
+  const now = Date.now();
+  const cleanNote = note?.trim() || null;
+
+  const outcome = await db.tx(async (tx) => {
+    const row = (await tx.get(
+      "SELECT reel_id, video_url, thumbnail_url, is_published, review_status, pending_changes_json FROM reels WHERE reel_id = ?",
+      [reelId]
+    )) as
+      | {
+          reel_id: number;
+          video_url: string;
+          thumbnail_url: string | null;
+          is_published: number;
+          review_status: string | null;
+          pending_changes_json: string | null;
+        }
+      | undefined;
+    if (!row) return { ok: false as const, reason: "not_found" as const };
+
+    const pending = parseReelChanges(row.pending_changes_json);
+    if (pending) {
+      if (decision === "approve") {
+        const { sets, params } = reelChangeAssignments(pending);
+        sets.push(
+          "pending_changes_json = NULL",
+          "pending_by_name = NULL",
+          "pending_at = NULL",
+          "review_note = NULL",
+          "updated_at = ?"
+        );
+        params.push(now);
+        await tx.run(`UPDATE reels SET ${sets.join(", ")} WHERE reel_id = ?`, [...params, reelId]);
+        return { ok: true as const, kind: "changes" as const, toDelete: filesReplacedBy(row, pending) };
+      }
+      // Rejected: discard; any newly uploaded files in the pending change are now unused.
+      const unused: string[] = [];
+      if (pending.videoUrl && pending.videoUrl !== row.video_url) unused.push(pending.videoUrl);
+      if (pending.thumbnailUrl && pending.thumbnailUrl !== row.thumbnail_url) unused.push(pending.thumbnailUrl);
+      await tx.run(
+        `UPDATE reels SET pending_changes_json = NULL, pending_by_name = NULL, pending_at = NULL, review_note = ? WHERE reel_id = ?`,
+        [cleanNote ? `Changes not approved: ${cleanNote}` : "Changes not approved.", reelId]
+      );
+      return { ok: true as const, kind: "changes" as const, toDelete: unused };
+    }
+
+    if (row.review_status === "pending") {
+      if (decision === "approve") {
+        await tx.run(
+          `UPDATE reels SET is_published = 1, review_status = NULL, review_note = NULL,
+             first_published_at = COALESCE(first_published_at, ?), updated_at = ?
+           WHERE reel_id = ?`,
+          [now, now, reelId]
+        );
+      } else {
+        await tx.run(`UPDATE reels SET review_status = 'rejected', review_note = ?, updated_at = ? WHERE reel_id = ?`, [
+          cleanNote,
+          now,
+          reelId,
+        ]);
+      }
+      return { ok: true as const, kind: "new-reel" as const, toDelete: [] as string[] };
+    }
+
+    return { ok: false as const, reason: "nothing_to_review" as const };
+  });
+
+  if (!outcome.ok) return outcome;
+  if (outcome.toDelete.length) await enqueueFileDeletes(db, "reels", outcome.toDelete);
+  void admin;
+  const reel = await getReelAdmin(reelId);
+  return {
+    ok: true,
+    kind: outcome.kind,
+    decision: decision === "approve" ? "approved" : "rejected",
+    reel: reel!,
   };
 }

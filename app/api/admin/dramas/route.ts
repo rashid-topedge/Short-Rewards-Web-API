@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
+import { isAuthenticatedAdmin, requireStaff } from "@/lib/auth";
 import { listDramasAdmin, createDramaAdmin } from "@/lib/db";
 
+// Moderators may read the list (to pick a drama for a reel); writes stay admin-only.
 export async function GET(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
   const { searchParams } = new URL(req.url);
   const query = searchParams.get("q") || "";
   const status = (searchParams.get("status") || "all") as "all" | "published" | "draft";

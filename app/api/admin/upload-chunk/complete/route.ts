@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
+import { requireStaff } from "@/lib/auth";
+import { canUploadTo } from "@/lib/reelPermissions";
 import { FolderType, b2FinishLargeFile, b2PublicUrl, getUrlSigner } from "@/lib/b2";
 import {
   createReelAdmin,
@@ -13,9 +14,9 @@ import { getVideoDurationFromUrl } from "@/lib/video";
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
+  const staff = auth.session;
 
   let sessionId = "";
   let claimed = false;
@@ -24,7 +25,8 @@ export async function POST(req: NextRequest) {
     sessionId = typeof body?.sessionId === "string" ? body.sessionId : "";
     // Old clients rely on reels being auto-created here; the reel uploader sends
     // createReel: false and saves the reel itself with the admin's title/description.
-    const createReel = body?.createReel !== false;
+    // Moderators save the reel themselves (as a draft or for approval).
+    const createReel = body?.createReel !== false && staff.role === "admin";
     if (!sessionId) {
       return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
     }
@@ -32,6 +34,9 @@ export async function POST(req: NextRequest) {
     const session = await getUploadSession(sessionId);
     if (!session) {
       return NextResponse.json({ error: "Session not found or expired" }, { status: 404 });
+    }
+    if (!canUploadTo(staff, session.folderType)) {
+      return NextResponse.json({ error: "Moderators can only upload reels." }, { status: 403 });
     }
 
     const parts = await getUploadPartSha1s(sessionId);

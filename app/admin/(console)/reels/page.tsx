@@ -4,6 +4,10 @@ import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
+  ClipboardCheck,
+  Hourglass,
+  Send,
+  UserRound,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -27,10 +31,20 @@ import DramaPicker, { type DramaRef } from "@/components/admin/DramaPicker";
 import { useCursorPager } from "@/components/admin/useCursorPager";
 import ReelUploadDialog, { PublishSwitch, TextField } from "@/components/admin/ReelUploadDialog";
 import { inspectVideo, uploadFileChunked } from "@/lib/chunkUpload";
-import type { ReelItem } from "@/lib/types";
+import type { AdminReelItem, ReelChanges } from "@/lib/types";
 
-/** Admin list items also carry signed URLs for previewing private-bucket media. */
-type AdminReel = ReelItem & { previewVideoUrl?: string; previewThumbnailUrl?: string | null };
+/** List items carry permissions for the signed-in user and signed preview URLs. */
+type AdminReel = AdminReelItem;
+
+type Me = { role: "admin" | "moderator"; displayName: string; actorId: string; pendingReviewCount: number };
+type StatusFilter = "all" | "published" | "draft" | "pending";
+
+const STATUS_TABS: { value: StatusFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "published", label: "Live" },
+  { value: "draft", label: "Drafts" },
+  { value: "pending", label: "Waiting for approval" },
+];
 
 const PAGE_SIZE = 20;
 
@@ -41,7 +55,10 @@ export default function AdminReelsPage() {
   const [loadError, setLoadError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "published" | "draft">("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [mineOnly, setMineOnly] = useState(false);
+  const [me, setMe] = useState<Me | null>(null);
+  const [reviewing, setReviewing] = useState<AdminReel | null>(null);
   const pager = useCursorPager();
   const { cursor, reset: resetPager, setNextCursor } = pager;
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -53,6 +70,20 @@ export default function AdminReelsPage() {
   const [editing, setEditing] = useState<AdminReel | "new" | null>(null);
 
   const searchId = useId();
+  const isAdmin = me?.role === "admin";
+  const isModerator = me?.role === "moderator";
+
+  const fetchMe = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/me");
+      if (res.ok) setMe(await res.json());
+    } catch {
+      // the list still works; actions follow each reel's permissions
+    }
+  }, []);
+  useEffect(() => {
+    fetchMe();
+  }, [fetchMe]);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 300);
@@ -69,6 +100,7 @@ export default function AdminReelsPage() {
         limit: String(PAGE_SIZE),
       });
       if (cursor) params.set("cursor", cursor);
+      if (mineOnly) params.set("mine", "1");
       const res = await fetch(`/api/admin/reels?${params.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -81,13 +113,18 @@ export default function AdminReelsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedQuery, statusFilter, cursor, setNextCursor]);
+  }, [debouncedQuery, statusFilter, mineOnly, cursor, setNextCursor]);
+
+  const refresh = useCallback(() => {
+    fetchReels();
+    fetchMe();
+  }, [fetchReels, fetchMe]);
 
   useEffect(() => {
     fetchReels();
   }, [fetchReels]);
 
-  useEffect(() => setSelectedIds([]), [debouncedQuery, statusFilter, cursor]);
+  useEffect(() => setSelectedIds([]), [debouncedQuery, statusFilter, mineOnly, cursor]);
 
   const allSelected = reels.length > 0 && selectedIds.length === reels.length;
   const toggleSelectAll = () => setSelectedIds(allSelected ? [] : reels.map((r) => r.reelId));
@@ -115,29 +152,47 @@ export default function AdminReelsPage() {
     }
   };
 
+  /** Admin: publish/unpublish. Moderator: hide own live reel. */
   const togglePublish = async (reel: AdminReel) => {
     const next = !reel.isPublished;
+    if (!next && isModerator && !window.confirm(`Hide "${reel.title}" from the app? It will need approval to go live again.`)) {
+      return;
+    }
     const res = await fetch(`/api/admin/reels/${reel.reelId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ isPublished: next }),
     });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
     if (res.ok) {
-      setReels((prev) => prev.map((r) => (r.reelId === reel.reelId ? { ...r, isPublished: next } : r)));
-      setNotice(`"${reel.title}" ${next ? "published" : "moved to drafts"}.`);
+      setNotice(`"${reel.title}" ${next ? "published" : "unpublished and moved to drafts"}.`);
+      refresh();
     } else {
-      setNotice(`Couldn't update "${reel.title}".`);
+      setNotice(data.error || `Couldn't update "${reel.title}".`);
     }
+  };
+
+  /** Moderator: send own draft/rejected reel for approval. */
+  const submitForReview = async (reel: AdminReel) => {
+    const res = await fetch(`/api/admin/reels/${reel.reelId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ submitForReview: true }),
+    });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    setNotice(res.ok ? `"${reel.title}" sent for approval.` : data.error || `Couldn't submit "${reel.title}".`);
+    if (res.ok) refresh();
   };
 
   const handleDelete = async (reel: AdminReel) => {
     if (!window.confirm(`Delete the reel "${reel.title}"? This can't be undone.`)) return;
     const res = await fetch(`/api/admin/reels/${reel.reelId}`, { method: "DELETE" });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
     if (res.ok) {
       setNotice(`"${reel.title}" deleted.`);
-      fetchReels();
+      refresh();
     } else {
-      setNotice(`Couldn't delete "${reel.title}".`);
+      setNotice(data.error || `Couldn't delete "${reel.title}".`);
     }
   };
 
@@ -153,7 +208,11 @@ export default function AdminReelsPage() {
           <h1 className="flex items-center gap-2.5 text-2xl font-bold text-white">
             <Video className="h-6 w-6 text-purple-300" aria-hidden="true" /> Short reels
           </h1>
-          <p className="mt-1 text-sm text-neutral-300">Upload vertical videos, edit their details and control what&apos;s live.</p>
+          <p className="mt-1 text-sm text-neutral-300">
+            {isModerator
+              ? "Upload vertical videos and edit your own reels. New reels and changes to live reels go live after an admin approves them."
+              : "Upload vertical videos, edit their details and control what's live."}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -192,8 +251,8 @@ export default function AdminReelsPage() {
             className="h-11 w-full rounded-xl border border-[#2b3850] bg-[#161c28] pl-10 pr-4 text-sm text-white placeholder:text-neutral-500 focus:border-purple-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
           />
         </div>
-        <div role="group" aria-label="Filter by status" className="flex gap-1 rounded-xl border border-[#2b3850] bg-[#161c28] p-1">
-          {(["all", "published", "draft"] as const).map((st) => (
+        <div role="group" aria-label="Filter by status" className="flex flex-wrap gap-1 rounded-xl border border-[#2b3850] bg-[#161c28] p-1">
+          {STATUS_TABS.map(({ value: st, label }) => (
             <button
               key={st}
               type="button"
@@ -202,15 +261,51 @@ export default function AdminReelsPage() {
                 setStatusFilter(st);
                 resetPager();
               }}
-              className={`h-9 flex-1 rounded-lg px-4 text-sm font-semibold capitalize transition focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 md:flex-none ${
+              className={`inline-flex h-9 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 md:flex-none ${
                 statusFilter === st ? "bg-purple-600 text-white" : "text-neutral-300 hover:text-white"
               }`}
             >
-              {st === "draft" ? "Drafts" : st}
+              {label}
+              {st === "pending" && isAdmin && (me?.pendingReviewCount ?? 0) > 0 && (
+                <span className="rounded-full bg-amber-400 px-1.5 text-xs font-bold text-black">
+                  {me?.pendingReviewCount}
+                  <span className="sr-only"> waiting</span>
+                </span>
+              )}
             </button>
           ))}
         </div>
+        <label className="flex h-11 cursor-pointer items-center gap-2 whitespace-nowrap rounded-xl border border-[#2b3850] bg-[#161c28] px-3 text-sm font-medium text-neutral-200">
+          <input
+            type="checkbox"
+            checked={mineOnly}
+            onChange={(e) => {
+              setMineOnly(e.target.checked);
+              resetPager();
+            }}
+            className="h-4 w-4 accent-purple-500"
+          />
+          {isAdmin ? "Uploaded by me" : "My reels only"}
+        </label>
       </div>
+
+      {isAdmin && (me?.pendingReviewCount ?? 0) > 0 && statusFilter !== "pending" && (
+        <button
+          type="button"
+          onClick={() => {
+            setStatusFilter("pending");
+            resetPager();
+          }}
+          className="flex w-full items-center gap-3 rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-left text-sm text-amber-100 hover:bg-amber-400/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+        >
+          <Hourglass className="h-4 w-4 shrink-0 text-amber-300" aria-hidden="true" />
+          <span className="flex-1">
+            <strong className="text-white">{me?.pendingReviewCount}</strong> reel{me?.pendingReviewCount === 1 ? "" : "s"}{" "}
+            from moderators waiting for your approval.
+          </span>
+          <span className="font-semibold text-amber-200">Review now →</span>
+        </button>
+      )}
 
       {/* Status messages for everyone, announced to screen readers */}
       <div role="status" aria-live="polite" className={notice ? "" : "sr-only"}>
@@ -230,7 +325,7 @@ export default function AdminReelsPage() {
       </div>
 
       {/* Bulk bar */}
-      {selectedIds.length > 0 && (
+      {isAdmin && selectedIds.length > 0 && (
         <div className="flex flex-col gap-3 rounded-xl border border-purple-500/40 bg-purple-950/40 p-3.5 text-sm sm:flex-row sm:items-center sm:justify-between">
           <p className="text-purple-100">
             <span className="font-bold text-white">{selectedIds.length}</span> selected
@@ -265,16 +360,20 @@ export default function AdminReelsPage() {
 
       {/* Count + select all */}
       <div className="flex flex-wrap items-center justify-between gap-3 px-1 text-sm text-neutral-300">
-        <label className="flex cursor-pointer items-center gap-2 font-medium">
-          <input
-            type="checkbox"
-            checked={allSelected}
-            onChange={toggleSelectAll}
-            disabled={reels.length === 0}
-            className="h-4 w-4 accent-purple-500"
-          />
-          Select all on this page
-        </label>
+        {isAdmin ? (
+          <label className="flex cursor-pointer items-center gap-2 font-medium">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={toggleSelectAll}
+              disabled={reels.length === 0}
+              className="h-4 w-4 accent-purple-500"
+            />
+            Select all on this page
+          </label>
+        ) : (
+          <span />
+        )}
         <span>
           {total === 0 ? "No reels" : `Showing ${firstShown}–${firstShown + reels.length - 1} of ${total.toLocaleString()}`}
         </span>
@@ -301,9 +400,13 @@ export default function AdminReelsPage() {
           <Video className="mx-auto h-10 w-10 text-neutral-500" aria-hidden="true" />
           <p className="text-base font-semibold text-neutral-200">No reels found</p>
           <p className="text-sm text-neutral-400">
-            {debouncedQuery || statusFilter !== "all" ? "Try a different search or filter." : "Upload your first reels to get started."}
+            {statusFilter === "pending" && !debouncedQuery
+              ? "Nothing is waiting for approval."
+              : debouncedQuery || statusFilter !== "all" || mineOnly
+              ? "Try a different search or filter."
+              : "Upload your first reels to get started."}
           </p>
-          {!debouncedQuery && statusFilter === "all" && (
+          {!debouncedQuery && statusFilter === "all" && !mineOnly && (
             <button
               type="button"
               onClick={() => setUploadOpen(true)}
@@ -319,12 +422,15 @@ export default function AdminReelsPage() {
             <ReelCard
               key={reel.reelId}
               reel={reel}
+              selectable={isAdmin}
               selected={selectedIds.includes(reel.reelId)}
               onSelect={() => toggleSelect(reel.reelId)}
               onPlay={() => setPreview(reel)}
               onEdit={() => setEditing(reel)}
               onDelete={() => handleDelete(reel)}
               onTogglePublish={() => togglePublish(reel)}
+              onSubmit={() => submitForReview(reel)}
+              onReview={() => setReviewing(reel)}
             />
           ))}
         </ul>
@@ -358,10 +464,11 @@ export default function AdminReelsPage() {
       <ReelUploadDialog
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
+        moderator={isModerator}
         onSaved={() => {
           resetPager();
-          fetchReels();
-          setNotice("New reels saved.");
+          refresh();
+          setNotice(isModerator ? "New reels saved. Ones you submitted are now waiting for approval." : "New reels saved.");
         }}
       />
 
@@ -369,11 +476,22 @@ export default function AdminReelsPage() {
 
       <ReelEditDialog
         reel={editing}
+        moderator={isModerator}
         onClose={() => setEditing(null)}
         onSaved={(msg) => {
           setEditing(null);
           setNotice(msg);
-          fetchReels();
+          refresh();
+        }}
+      />
+
+      <ReviewDialog
+        reel={reviewing}
+        onClose={() => setReviewing(null)}
+        onDone={(msg) => {
+          setReviewing(null);
+          setNotice(msg);
+          refresh();
         }}
       />
     </div>
@@ -382,24 +500,46 @@ export default function AdminReelsPage() {
 
 // ------------------------------------------------------------------
 
+function statusBadge(reel: AdminReel): { label: string; className: string; icon: React.ReactNode } {
+  if (reel.isPublished) {
+    return { label: "Live", className: "bg-emerald-500 text-white", icon: <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" /> };
+  }
+  if (reel.reviewStatus === "pending") {
+    return { label: "Waiting for approval", className: "bg-sky-400 text-black", icon: <Hourglass className="h-3.5 w-3.5" aria-hidden="true" /> };
+  }
+  if (reel.reviewStatus === "rejected") {
+    return { label: "Not approved", className: "bg-rose-500 text-white", icon: <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" /> };
+  }
+  return { label: "Draft", className: "bg-amber-400 text-black", icon: <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" /> };
+}
+
 function ReelCard({
   reel,
+  selectable,
   selected,
   onSelect,
   onPlay,
   onEdit,
   onDelete,
   onTogglePublish,
+  onSubmit,
+  onReview,
 }: {
   reel: AdminReel;
+  selectable: boolean;
   selected: boolean;
   onSelect: () => void;
   onPlay: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onTogglePublish: () => void;
+  onSubmit: () => void;
+  onReview: () => void;
 }) {
   const thumb = reel.previewThumbnailUrl ?? reel.thumbnailUrl;
+  const p = reel.permissions;
+  const badge = statusBadge(reel);
+  const showNote = Boolean(reel.reviewNote) && (p?.canEdit ?? false);
   return (
     <li
       className={`group relative flex flex-col overflow-hidden rounded-2xl border bg-[#0f141f] transition ${
@@ -417,23 +557,24 @@ function ReelCard({
         )}
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/50" />
 
-        <label className="absolute left-2 top-2 flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg bg-black/60 backdrop-blur">
-          <input type="checkbox" checked={selected} onChange={onSelect} className="h-4 w-4 accent-purple-500" />
-          <span className="sr-only">Select {reel.title}</span>
-        </label>
+        {selectable && (
+          <label className="absolute left-2 top-2 flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg bg-black/60 backdrop-blur">
+            <input type="checkbox" checked={selected} onChange={onSelect} className="h-4 w-4 accent-purple-500" />
+            <span className="sr-only">Select {reel.title}</span>
+          </label>
+        )}
 
-        <span
-          className={`absolute right-2 top-2 inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-bold ${
-            reel.isPublished ? "bg-emerald-500 text-white" : "bg-amber-400 text-black"
-          }`}
-        >
-          {reel.isPublished ? (
-            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-          ) : (
-            <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
+        <div className="absolute right-2 top-2 flex flex-col items-end gap-1">
+          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-bold ${badge.className}`}>
+            {badge.icon}
+            {badge.label}
+          </span>
+          {reel.pendingChanges && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-sky-400 px-2 py-1 text-xs font-bold text-black">
+              <Hourglass className="h-3.5 w-3.5" aria-hidden="true" /> Changes pending
+            </span>
           )}
-          {reel.isPublished ? "Live" : "Draft"}
-        </span>
+        </div>
 
         <button
           type="button"
@@ -467,6 +608,18 @@ function ReelCard({
               <Tv2 className="h-3 w-3 shrink-0" aria-hidden="true" /> {reel.dramaTitle}
             </p>
           )}
+          <p className="mt-1 flex items-center gap-1 truncate text-xs text-neutral-400" title={reel.updatedByName ? `Last edited by ${reel.updatedByName}` : undefined}>
+            <UserRound className="h-3 w-3 shrink-0" aria-hidden="true" />
+            <span className="truncate">
+              by {reel.createdByName || "Admin"}
+              {reel.updatedByName && reel.updatedByName !== (reel.createdByName || "Admin") ? ` · edited by ${reel.updatedByName}` : ""}
+            </span>
+          </p>
+          {showNote && (
+            <p className="mt-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-100">
+              <span className="font-semibold">Admin note:</span> {reel.reviewNote}
+            </p>
+          )}
         </div>
 
         <div className="flex items-center justify-between border-t border-[#1e283b] pt-2">
@@ -475,19 +628,39 @@ function ReelCard({
             <span className="sr-only">views</span>
           </span>
           <div className="flex items-center gap-1">
-            <IconButton
-              label={reel.isPublished ? `Unpublish ${reel.title}` : `Publish ${reel.title}`}
-              onClick={onTogglePublish}
-              className={reel.isPublished ? "text-amber-300" : "text-emerald-300"}
-            >
-              {reel.isPublished ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Globe className="h-4 w-4" aria-hidden="true" />}
-            </IconButton>
-            <IconButton label={`Edit ${reel.title}`} onClick={onEdit} className="text-sky-300">
-              <Edit3 className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-            <IconButton label={`Delete ${reel.title}`} onClick={onDelete} className="text-rose-300 hover:bg-rose-500/15">
-              <Trash2 className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
+            {p?.canReview && (
+              <IconButton label={`Review ${reel.title}`} onClick={onReview} className="text-amber-300">
+                <ClipboardCheck className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            )}
+            {p?.canTogglePublish ? (
+              <IconButton
+                label={reel.isPublished ? `Unpublish ${reel.title}` : `Publish ${reel.title}`}
+                onClick={onTogglePublish}
+                className={reel.isPublished ? "text-amber-300" : "text-emerald-300"}
+              >
+                {reel.isPublished ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Globe className="h-4 w-4" aria-hidden="true" />}
+              </IconButton>
+            ) : p?.canUnpublish ? (
+              <IconButton label={`Unpublish ${reel.title}`} onClick={onTogglePublish} className="text-amber-300">
+                <EyeOff className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            ) : null}
+            {p?.canSubmit && (
+              <IconButton label={`Submit ${reel.title} for approval`} onClick={onSubmit} className="text-emerald-300">
+                <Send className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            )}
+            {p?.canEdit && (
+              <IconButton label={`Edit ${reel.title}`} onClick={onEdit} className="text-sky-300">
+                <Edit3 className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            )}
+            {p?.canDelete && (
+              <IconButton label={`Delete ${reel.title}`} onClick={onDelete} className="text-rose-300 hover:bg-rose-500/15">
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            )}
           </div>
         </div>
       </div>
@@ -589,10 +762,12 @@ type EditForm = {
 
 function ReelEditDialog({
   reel,
+  moderator,
   onClose,
   onSaved,
 }: {
   reel: AdminReel | "new" | null;
+  moderator: boolean;
   onClose: () => void;
   onSaved: (message: string) => void;
 }) {
@@ -622,20 +797,29 @@ function ReelEditDialog({
       setForm(emptyForm());
       setThumbPreview(null);
     } else {
+      // A live reel with changes waiting for approval opens with those changes,
+      // so the moderator keeps editing their proposal.
+      const pc: ReelChanges = reel.pendingChanges ?? {};
+      const dramaId = pc.dramaId !== undefined ? pc.dramaId : reel.dramaId;
       setForm({
-        title: reel.title || "",
-        synopsis: reel.synopsis || "",
-        videoUrl: reel.videoUrl || "",
-        thumbnailUrl: reel.thumbnailUrl || "",
-        durationSeconds: String(reel.durationSeconds || ""),
-        drama: reel.dramaId ? { dramaId: reel.dramaId, title: reel.dramaTitle ?? null } : null,
-        episodeNumber: reel.episodeNumber ? String(reel.episodeNumber) : "",
-        tags: (reel.tags || []).join(", "),
-        isPublished: Boolean(reel.isPublished),
+        title: pc.title ?? reel.title ?? "",
+        synopsis: (pc.synopsis !== undefined ? pc.synopsis : reel.synopsis) || "",
+        videoUrl: pc.videoUrl ?? reel.videoUrl ?? "",
+        thumbnailUrl: (pc.thumbnailUrl !== undefined ? pc.thumbnailUrl : reel.thumbnailUrl) || "",
+        durationSeconds: String(pc.durationSeconds ?? reel.durationSeconds ?? ""),
+        drama: dramaId ? { dramaId, title: dramaId === reel.dramaId ? reel.dramaTitle ?? null : null } : null,
+        episodeNumber: String((pc.episodeNumber !== undefined ? pc.episodeNumber : reel.episodeNumber) || ""),
+        tags: (pc.tags ?? reel.tags ?? []).join(", "),
+        // Moderators: the switch means "submit for approval" (off for drafts).
+        isPublished: moderator ? false : Boolean(reel.isPublished),
       });
-      setThumbPreview(reel.previewThumbnailUrl ?? reel.thumbnailUrl ?? null);
+      setThumbPreview(
+        pc.thumbnailUrl !== undefined
+          ? reel.pendingPreview?.thumbnailUrl ?? pc.thumbnailUrl ?? null
+          : reel.previewThumbnailUrl ?? reel.thumbnailUrl ?? null
+      );
     }
-  }, [reel]);
+  }, [reel, moderator]);
 
   const set = (patch: Partial<EditForm>) => setForm((f) => ({ ...f, ...patch }));
 
@@ -684,10 +868,16 @@ function ReelEditDialog({
     setSaving(true);
     setError("");
     try {
+      const publishField = moderator
+        ? existing?.isPublished || existing?.reviewStatus === "pending"
+          ? {}
+          : { submitForReview: form.isPublished }
+        : { isPublished: form.isPublished };
       const res = await fetch(existing ? `/api/admin/reels/${existing.reelId}` : "/api/admin/reels", {
         method: existing ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...publishField,
           title: form.title.trim(),
           synopsis: form.synopsis.trim(),
           videoUrl: form.videoUrl.trim(),
@@ -696,12 +886,20 @@ function ReelEditDialog({
           dramaId: form.drama?.dramaId ?? null,
           episodeNumber: form.episodeNumber ? Number(form.episodeNumber) : null,
           tags: form.tags.split(",").map((t) => t.trim()).filter(Boolean),
-          isPublished: form.isPublished,
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      const data = (await res.json().catch(() => ({}))) as { error?: string; mode?: string; reviewStatus?: string | null };
       if (!res.ok) throw new Error(data.error || "Could not save the reel");
-      onSaved(existing ? `"${form.title.trim()}" updated.` : `"${form.title.trim()}" created.`);
+      const name = `"${form.title.trim()}"`;
+      onSaved(
+        data.mode === "pending-changes"
+          ? `Changes to ${name} sent for approval. The live version stays until an admin approves them.`
+          : moderator && data.reviewStatus === "pending"
+          ? `${name} saved and waiting for approval.`
+          : existing
+          ? `${name} updated.`
+          : `${name} created.`
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save the reel");
     } finally {
@@ -743,6 +941,31 @@ function ReelEditDialog({
             {error && (
               <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2.5 text-sm text-rose-100">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> {error}
+              </div>
+            )}
+
+            {existing?.reviewNote && (
+              <div className="flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2.5 text-sm text-rose-100">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>
+                  <strong className="font-semibold">Admin note:</strong> {existing.reviewNote}
+                </span>
+              </div>
+            )}
+            {existing?.pendingChanges && (
+              <div className="flex items-start gap-2 rounded-xl border border-sky-400/40 bg-sky-400/10 px-3 py-2.5 text-sm text-sky-100">
+                <Hourglass className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>
+                  {moderator
+                    ? "You're editing your changes that are waiting for approval. The live version stays as it is until an admin approves them."
+                    : `${existing.pendingByName || "A moderator"} proposed changes to this reel. Use Review on the card to approve or reject them; saving here edits the live version.`}
+                </span>
+              </div>
+            )}
+            {moderator && existing?.isPublished && !existing.pendingChanges && (
+              <div className="flex items-start gap-2 rounded-xl border border-[#2b3850] bg-[#121a29] px-3 py-2.5 text-sm text-neutral-200">
+                <Globe className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" aria-hidden="true" />
+                This reel is live. Your changes will be sent for approval; the app keeps showing the current version until then.
               </div>
             )}
 
@@ -906,7 +1129,13 @@ function ReelEditDialog({
 
             <TextField label="Tags" optional value={form.tags} onChange={(tags) => set({ tags })} placeholder="Comma separated" />
 
-            <PublishSwitch checked={form.isPublished} onChange={(isPublished) => set({ isPublished })} />
+            {moderator && existing?.isPublished ? null : moderator && existing?.reviewStatus === "pending" ? (
+              <p className="flex items-center gap-2 text-sm text-sky-200">
+                <Hourglass className="h-4 w-4" aria-hidden="true" /> Waiting for approval. Your edits are included in the review.
+              </p>
+            ) : (
+              <PublishSwitch checked={form.isPublished} onChange={(isPublished) => set({ isPublished })} moderator={moderator} />
+            )}
           </div>
 
           <div className="flex justify-end gap-2 border-t border-[#1e283b] bg-[#0b1019] px-5 py-4">
@@ -924,12 +1153,292 @@ function ReelEditDialog({
               className="inline-flex h-11 items-center gap-2 rounded-xl bg-purple-600 px-5 text-sm font-bold text-white hover:bg-purple-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-300 disabled:opacity-50"
             >
               {saving && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-              {saving ? "Saving…" : isNew ? "Create reel" : "Save changes"}
+              {saving
+                ? "Saving…"
+                : moderator && existing?.isPublished
+                ? "Send changes for approval"
+                : isNew
+                ? moderator && form.isPublished
+                  ? "Submit for approval"
+                  : "Create reel"
+                : "Save changes"}
             </button>
           </div>
         </form>
       )}
     </dialog>
+  );
+}
+
+// ------------------------------------------------------------------
+
+const FIELD_LABELS: Record<keyof ReelChanges, string> = {
+  title: "Title",
+  synopsis: "Description",
+  tags: "Tags",
+  videoUrl: "Video",
+  thumbnailUrl: "Thumbnail",
+  durationSeconds: "Length",
+  dramaId: "Linked drama",
+  episodeNumber: "Episode #",
+};
+
+function displayValue(key: keyof ReelChanges, value: unknown, reel: AdminReel): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (key === "tags") return (value as string[]).join(", ") || "—";
+  if (key === "durationSeconds") return `${value}s`;
+  if (key === "dramaId") return value === reel.dramaId && reel.dramaTitle ? reel.dramaTitle : `Drama #${value}`;
+  return String(value);
+}
+
+/** Admin: approve or reject a moderator's new reel or their changes to a live reel. */
+function ReviewDialog({
+  reel,
+  onClose,
+  onDone,
+}: {
+  reel: AdminReel | null;
+  onClose: () => void;
+  onDone: (message: string) => void;
+}) {
+  const ref = useModal(reel !== null);
+  const headingId = useId();
+  const noteId = useId();
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+
+  useEffect(() => {
+    setNote("");
+    setError("");
+    setBusy(null);
+  }, [reel]);
+
+  const changes = reel?.pendingChanges ?? null;
+  const isChanges = Boolean(changes);
+  const by = reel ? (isChanges ? reel.pendingByName : reel.createdByName) || "A moderator" : "";
+  const when = reel ? (isChanges ? reel.pendingAt : null) : null;
+
+  const decide = async (action: "approve" | "reject") => {
+    if (!reel) return;
+    if (action === "reject" && !note.trim()) {
+      setError("Add a note so the moderator knows what to fix.");
+      document.getElementById(noteId)?.focus();
+      return;
+    }
+    setBusy(action);
+    setError("");
+    try {
+      const res = await fetch(`/api/admin/reels/${reel.reelId}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, note: note.trim() }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(data.error || "Could not save your decision");
+      const what = isChanges ? `Changes to "${reel.title}"` : `"${reel.title}"`;
+      onDone(
+        action === "approve"
+          ? `${what} approved${isChanges ? " and now live" : " and published"}.`
+          : `${what} rejected. ${by} will see your note.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save your decision");
+      setBusy(null);
+    }
+  };
+
+  const changedKeys = changes ? (Object.keys(changes) as (keyof ReelChanges)[]) : [];
+
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={headingId}
+      onCancel={(e) => {
+        e.preventDefault();
+        if (!busy) onClose();
+      }}
+      className="m-auto max-h-[100dvh] w-full max-w-3xl bg-transparent p-0 text-neutral-100 backdrop:bg-black/80 backdrop:backdrop-blur-sm sm:max-h-[92vh] sm:p-4"
+    >
+      {reel && (
+        <div className="flex max-h-[100dvh] flex-col overflow-hidden border-[#26324a] bg-[#0d121c] shadow-2xl sm:max-h-[88vh] sm:rounded-2xl sm:border">
+          <div className="flex items-start justify-between gap-3 border-b border-[#1e283b] px-5 py-4">
+            <div>
+              <h2 id={headingId} className="flex items-center gap-2 text-lg font-bold text-white">
+                <ClipboardCheck className="h-5 w-5 text-amber-300" aria-hidden="true" />
+                {isChanges ? "Review changes to a live reel" : "Review new reel"}
+              </h2>
+              <p className="mt-0.5 text-sm text-neutral-300">
+                {isChanges ? "Proposed" : "Uploaded"} by <strong className="text-white">{by}</strong>
+                {when ? ` · ${new Date(when).toLocaleString()}` : ""}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy !== null}
+              className="rounded-lg p-2 text-neutral-300 hover:bg-white/10 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 disabled:opacity-40"
+              aria-label="Close"
+            >
+              <X className="h-5 w-5" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+            {error && (
+              <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2.5 text-sm text-rose-100">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> {error}
+              </div>
+            )}
+
+            {isChanges ? (
+              <>
+                <p className="text-sm text-neutral-300">
+                  The app keeps showing the live version until you approve. Changed fields:
+                </p>
+                <div className="overflow-x-auto rounded-xl border border-[#1e283b]">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-[#121a29] text-xs uppercase tracking-wide text-neutral-400">
+                      <tr>
+                        <th scope="col" className="px-3 py-2">Field</th>
+                        <th scope="col" className="px-3 py-2">Live now</th>
+                        <th scope="col" className="px-3 py-2">Proposed</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1e283b]">
+                      {changedKeys.map((key) => {
+                        const liveValue =
+                          key === "synopsis" ? reel.synopsis : key === "tags" ? reel.tags : (reel as unknown as Record<string, unknown>)[key];
+                        return (
+                          <tr key={key} className="align-top">
+                            <th scope="row" className="whitespace-nowrap px-3 py-2.5 font-medium text-neutral-200">
+                              {FIELD_LABELS[key]}
+                            </th>
+                            {key === "videoUrl" || key === "thumbnailUrl" ? (
+                              <>
+                                <td className="px-3 py-2.5">
+                                  <MediaPreview
+                                    kind={key === "videoUrl" ? "video" : "image"}
+                                    src={key === "videoUrl" ? reel.previewVideoUrl ?? reel.videoUrl : reel.previewThumbnailUrl ?? reel.thumbnailUrl}
+                                  />
+                                </td>
+                                <td className="bg-sky-400/5 px-3 py-2.5">
+                                  <MediaPreview
+                                    kind={key === "videoUrl" ? "video" : "image"}
+                                    src={
+                                      key === "videoUrl"
+                                        ? reel.pendingPreview?.videoUrl ?? changes?.videoUrl
+                                        : reel.pendingPreview?.thumbnailUrl ?? changes?.thumbnailUrl
+                                    }
+                                  />
+                                </td>
+                              </>
+                            ) : (
+                              <>
+                                <td className="whitespace-pre-wrap break-words px-3 py-2.5 text-neutral-400 line-through decoration-rose-400/60">
+                                  {displayValue(key, liveValue, reel)}
+                                </td>
+                                <td className="whitespace-pre-wrap break-words bg-sky-400/5 px-3 py-2.5 text-white">
+                                  {displayValue(key, changes?.[key], reel)}
+                                </td>
+                              </>
+                            )}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-[200px_1fr]">
+                <video
+                  src={reel.previewVideoUrl ?? reel.videoUrl}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  className="aspect-[9/16] w-full rounded-xl bg-black object-contain"
+                />
+                <dl className="space-y-3 text-sm">
+                  <div>
+                    <dt className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Title</dt>
+                    <dd className="mt-0.5 text-white">{reel.title}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Description</dt>
+                    <dd className="mt-0.5 whitespace-pre-wrap text-neutral-200">{reel.synopsis || "—"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Tags</dt>
+                    <dd className="mt-0.5 text-neutral-200">{reel.tags?.join(", ") || "—"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Linked drama</dt>
+                    <dd className="mt-0.5 text-neutral-200">
+                      {reel.dramaTitle || "—"}
+                      {reel.episodeNumber ? ` · Episode ${reel.episodeNumber}` : ""}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <label htmlFor={noteId} className="block text-sm font-medium text-neutral-200">
+                Note for {by} <span className="font-normal text-neutral-400">(required to reject)</span>
+              </label>
+              <textarea
+                id={noteId}
+                rows={3}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="e.g. The title has a typo, and please use a brighter thumbnail."
+                className="w-full rounded-xl border border-[#2b3850] bg-[#161c28] px-3 py-2.5 text-sm text-white placeholder:text-neutral-500 focus:border-purple-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap justify-end gap-2 border-t border-[#1e283b] bg-[#0b1019] px-5 py-4">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy !== null}
+              className="h-11 rounded-xl bg-[#1a2232] px-4 text-sm font-semibold text-neutral-200 hover:bg-[#232d41] focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 disabled:opacity-50"
+            >
+              Decide later
+            </button>
+            <button
+              type="button"
+              onClick={() => decide("reject")}
+              disabled={busy !== null}
+              className="inline-flex h-11 items-center gap-2 rounded-xl border border-rose-500/50 px-4 text-sm font-bold text-rose-200 hover:bg-rose-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:opacity-50"
+            >
+              {busy === "reject" && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+              Reject
+            </button>
+            <button
+              type="button"
+              onClick={() => decide("approve")}
+              disabled={busy !== null}
+              className="inline-flex h-11 items-center gap-2 rounded-xl bg-emerald-600 px-5 text-sm font-bold text-white hover:bg-emerald-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:opacity-50"
+            >
+              {busy === "approve" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
+              {isChanges ? "Approve changes" : "Approve & publish"}
+            </button>
+          </div>
+        </div>
+      )}
+    </dialog>
+  );
+}
+
+function MediaPreview({ kind, src }: { kind: "video" | "image"; src: string | null | undefined }) {
+  if (!src) return <span className="text-neutral-500">None</span>;
+  return kind === "video" ? (
+    <video src={src} controls playsInline preload="metadata" className="aspect-[9/16] w-32 rounded-lg bg-black object-contain" />
+  ) : (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={src} alt="" className="aspect-[9/16] w-20 rounded-lg bg-[#161c28] object-cover" />
   );
 }
 

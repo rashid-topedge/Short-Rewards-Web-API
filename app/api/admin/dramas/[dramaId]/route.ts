@@ -1,20 +1,25 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { processB2DeleteQueue } from "@/lib/b2Cleanup";
-import { isAuthenticatedAdmin } from "@/lib/auth";
+import { isAuthenticatedAdmin, requireStaff } from "@/lib/auth";
 import { getDrama, updateDramaAdmin, deleteDramaAdmin } from "@/lib/db";
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ dramaId: string }> }
 ) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  // Moderators may look a drama up (for the reel drama picker), without its episodes.
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
   const { dramaId } = await params;
   const id = parseInt(dramaId, 10);
   const drama = await getDrama(id, true);
   if (!drama) {
     return NextResponse.json({ error: "Drama not found" }, { status: 404 });
+  }
+  if (auth.session.role !== "admin") {
+    const { episodes: _episodes, ...summary } = drama as typeof drama & { episodes?: unknown };
+    void _episodes;
+    return NextResponse.json(summary);
   }
   return NextResponse.json(drama);
 }

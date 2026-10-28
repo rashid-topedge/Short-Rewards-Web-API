@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
-import { bulkUpdateReelsPublish } from "@/lib/db";
+import { getStaffSession } from "@/lib/auth";
+import { bulkUpdateReelsPublish, logActivity } from "@/lib/db";
+import { actorOf } from "@/lib/reelPermissions";
 
+/** Admin only: publish/unpublish many reels (publishing also approves them). */
 export async function POST(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
+  const session = await getStaffSession(req);
+  if (session?.role !== "admin") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -21,6 +24,12 @@ export async function POST(req: NextRequest) {
     }
 
     const count = await bulkUpdateReelsPublish(reelIds, isPublished);
+    await logActivity(actorOf(session), {
+      action: isPublished ? "reel.bulk_published" : "reel.bulk_unpublished",
+      entityType: "reel",
+      summary: `${isPublished ? "Published" : "Unpublished"} ${count} reel(s)`,
+      details: { reelIds: reelIds.slice(0, 200) },
+    });
     return NextResponse.json({
       success: true,
       count,
