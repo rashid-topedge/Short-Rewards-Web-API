@@ -893,7 +893,10 @@ export async function listReels(options?: {
   limit?: number;
   dramaId?: number;
   sort?: "newest" | "trending" | "random";
-}): Promise<{ limit: number; nextCursor: string | null; items: ReelItem[] }> {
+  /** Signed-in user: reels they haven't earned coins for come first. */
+  userId?: string;
+}): Promise<{ limit: number; nextCursor: string | null; items: (ReelItem & { rewardClaimed?: boolean })[] }> {
+  if (options?.userId) return listReelsForUser({ ...options, userId: options.userId });
   const db = await getDb();
   const limit = Math.max(1, Math.min(options?.limit ?? 10, 50));
   const dramaId = options?.dramaId;
@@ -982,6 +985,167 @@ export async function listReels(options?: {
     : null;
 
   return { limit, nextCursor, items: items.map(mapReelItem) };
+}
+
+/**
+ * Personal feed: every published reel, but the ones the user hasn't earned
+ * coins for yet come first (in the chosen sort), then the ones they have
+ * (most recent reels first).
+ *
+ * Cost: phase 1 is the normal indexed feed query plus one primary-key probe
+ * into user_reel_rewards per reel scanned (NOT EXISTS), so it only gets
+ * slower by the number of already-claimed reels it skips. Phase 2 walks the
+ * user's own rows in user_reel_rewards by primary key. A second query runs
+ * only on the one page where phase 1 runs out. No per-user state is stored.
+ *
+ * Cursor: "n:<feed cursor>" while in new reels, "s:<reel_id>" in seen reels.
+ * A cursor from the non-personal feed (no prefix) continues phase 1.
+ */
+async function listReelsForUser(options: {
+  cursor?: string | number;
+  limit?: number;
+  dramaId?: number;
+  sort?: "newest" | "trending" | "random";
+  userId: string;
+}): Promise<{ limit: number; nextCursor: string | null; items: (ReelItem & { rewardClaimed: boolean })[] }> {
+  const db = await getDb();
+  const limit = Math.max(1, Math.min(options.limit ?? 10, 50));
+  const { userId, dramaId } = options;
+  const sort = options.sort || "newest";
+  const rawCursor = options.cursor !== undefined ? String(options.cursor) : "";
+  const NOT_CLAIMED = "NOT EXISTS (SELECT 1 FROM user_reel_rewards x WHERE x.user_id = ? AND x.reel_id = r.reel_id)";
+
+  const tag = (rows: ReelRow[], claimed: boolean) => rows.map((r) => ({ ...mapReelItem(r), rewardClaimed: claimed }));
+
+  /** Reels the user already earned coins for, newest reel first. */
+  const seenPage = async (beforeReelId: number | null, take: number) => {
+    const where = ["x.user_id = ?", "r.is_published = 1"];
+    const params: InValue[] = [userId];
+    if (dramaId) {
+      where.push("r.drama_id = ?");
+      params.push(dramaId);
+    }
+    if (beforeReelId !== null) {
+      where.push("x.reel_id < ?");
+      params.push(beforeReelId);
+    }
+    return (await db.all(
+      `SELECT ${REEL_COLUMNS}
+       FROM user_reel_rewards x
+       JOIN reels r ON r.reel_id = x.reel_id
+       LEFT JOIN dramas d ON r.drama_id = d.drama_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY x.reel_id DESC
+       LIMIT ?`,
+      [...params, take]
+    )) as ReelRow[];
+  };
+
+  const baseWhere = ["r.is_published = 1"];
+  const baseParams: InValue[] = [];
+  if (dramaId) {
+    baseWhere.push("r.drama_id = ?");
+    baseParams.push(dramaId);
+  }
+
+  if (sort === "random") {
+    // New reels around a random point; topped up with seen ones when few are left.
+    const range = (await db.get(
+      `SELECT MIN(r.reel_id) AS lo, MAX(r.reel_id) AS hi FROM reels r WHERE ${baseWhere.join(" AND ")}`,
+      baseParams
+    )) as { lo: number | null; hi: number | null } | undefined;
+    if (!range || range.lo === null || range.hi === null) return { limit, nextCursor: null, items: [] };
+    const pivot = range.lo + Math.floor(Math.random() * (range.hi - range.lo + 1));
+    const base = `SELECT ${REEL_COLUMNS} FROM reels r LEFT JOIN dramas d ON r.drama_id = d.drama_id
+                  WHERE ${baseWhere.join(" AND ")} AND ${NOT_CLAIMED}`;
+    let fresh = (await db.all(`${base} AND r.reel_id >= ? ORDER BY r.reel_id ASC LIMIT ?`, [
+      ...baseParams,
+      userId,
+      pivot,
+      limit,
+    ])) as ReelRow[];
+    if (fresh.length < limit) {
+      fresh = fresh.concat(
+        (await db.all(`${base} AND r.reel_id < ? ORDER BY r.reel_id ASC LIMIT ?`, [
+          ...baseParams,
+          userId,
+          pivot,
+          limit - fresh.length,
+        ])) as ReelRow[]
+      );
+    }
+    for (let i = fresh.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [fresh[i], fresh[j]] = [fresh[j], fresh[i]];
+    }
+    const items = tag(fresh, false);
+    if (items.length < limit) items.push(...tag(await seenPage(null, limit - items.length), true));
+    return { limit, nextCursor: items.length >= limit ? "random" : null, items };
+  }
+
+  // Phase 2: already-claimed reels.
+  if (rawCursor.startsWith("s:")) {
+    const raw = rawCursor.slice(2);
+    const before = raw ? Number(raw) : NaN;
+    const rows = await seenPage(Number.isFinite(before) ? before : null, limit + 1);
+    const page = rows.slice(0, limit);
+    return {
+      limit,
+      nextCursor: rows.length > limit ? `s:${page[page.length - 1].reel_id}` : null,
+      items: tag(page, true),
+    };
+  }
+
+  // Phase 1: reels without a reward yet, in the chosen order.
+  const inner = rawCursor.startsWith("n:") ? rawCursor.slice(2) : rawCursor;
+  const where = [...baseWhere, NOT_CLAIMED];
+  const params: InValue[] = [...baseParams, userId];
+  let orderBy: string;
+  if (sort === "trending") {
+    if (inner) {
+      const [scoreStr, idStr] = inner.split("_");
+      const score = Number(scoreStr);
+      const id = Number(idStr);
+      if (Number.isFinite(score) && Number.isFinite(id)) {
+        where.push("(r.trending_score < ? OR (r.trending_score = ? AND r.reel_id < ?))");
+        params.push(score, score, id);
+      }
+    }
+    orderBy = "r.trending_score DESC, r.reel_id DESC";
+  } else {
+    const id = inner ? Number(inner) : NaN;
+    if (Number.isFinite(id)) {
+      where.push("r.reel_id < ?");
+      params.push(id);
+    }
+    orderBy = "r.reel_id DESC";
+  }
+  const fresh = (await db.all(
+    `SELECT ${REEL_COLUMNS}, r.trending_score
+     FROM reels r
+     LEFT JOIN dramas d ON r.drama_id = d.drama_id
+     WHERE ${where.join(" AND ")}
+     ORDER BY ${orderBy}
+     LIMIT ?`,
+    [...params, limit + 1]
+  )) as (ReelRow & { trending_score: number })[];
+
+  if (fresh.length > limit) {
+    const page = fresh.slice(0, limit);
+    const last = page[page.length - 1];
+    const next = sort === "trending" ? `${last.trending_score}_${last.reel_id}` : String(last.reel_id);
+    return { limit, nextCursor: `n:${next}`, items: tag(page, false) };
+  }
+
+  // New reels run out on this page: fill the rest with seen reels.
+  const need = limit - fresh.length;
+  const seen = await seenPage(null, need + 1);
+  const seenItems = seen.slice(0, need);
+  return {
+    limit,
+    nextCursor: seen.length > need ? `s:${seenItems.length ? seenItems[seenItems.length - 1].reel_id : ""}` : null,
+    items: [...tag(fresh, false), ...tag(seenItems, true)],
+  };
 }
 
 export async function getReel(reelId: number, includeUnpublished = false): Promise<ReelItem | null> {
