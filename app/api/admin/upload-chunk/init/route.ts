@@ -4,6 +4,7 @@ import { requireStaff } from "@/lib/auth";
 import { canUploadTo } from "@/lib/reelPermissions";
 import { B2_MIN_PART_BYTES, FolderType, b2StartLargeFile, getB2ConfigForFolder } from "@/lib/b2";
 import { createUploadSession } from "@/lib/db";
+import { ensureDirectUploads } from "@/lib/b2Direct";
 
 const FOLDER_TYPES: FolderType[] = ["dramas", "reels", "payouts"];
 const MAX_CHUNK_BYTES = 50 * 1024 * 1024;
@@ -89,8 +90,14 @@ export async function POST(req: NextRequest) {
       chunkSize,
     });
 
+    // Browsers send the bytes straight to Backblaze when the bucket allows it
+    // (hosts like Vercel reject request bodies over 4.5 MB).
+    const direct = await ensureDirectUploads(folderType);
+
     return NextResponse.json({
       success: true,
+      uploadMode: direct.ok ? "direct" : "server",
+      directProblem: direct.ok ? null : direct.reason,
       sessionId,
       chunkSize,
       totalChunks,

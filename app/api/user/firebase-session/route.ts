@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getOrCreateUser, resolveFirebaseUser } from "@/lib/db";
+import { checkReferralQualification, getOrCreateUser, resolveFirebaseUser } from "@/lib/db";
 import { FirebaseTokenError, verifyFirebaseIdToken } from "@/lib/firebaseAuth";
 import { authError, isValidUserId, issueSession } from "@/lib/userAuth";
 
@@ -74,6 +74,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Linking Google may complete a pending referral.
+    await checkReferralQualification(result.userId).catch((err) => console.error("Referral check failed:", err));
     const [user, session] = await Promise.all([getOrCreateUser(result.userId), issueSession(result.userId)]);
     return NextResponse.json({ ...user, ...session, created: result.created });
   } catch (err: unknown) {

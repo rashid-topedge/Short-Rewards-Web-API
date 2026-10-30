@@ -123,3 +123,80 @@ All auth errors are `{ "error": "<human message>", "code": "<CODE>" }`.
 - `GOOGLE_OAUTH_CLIENT_IDS`: the Web client ID (comma-separate several if needed).
 - `USER_AUTH_ALLOW_LEGACY=true` during the app rollout; set it to `false` once all users are on the new version.
 - `REDEEM_REQUIRE_GOOGLE`: optional, `false` by default.
+
+## Reward amounts (set by admin)
+
+Amounts can change at any time (admin → Rewards), so don't hard-code them:
+
+```
+GET /api/user/rewards/config        (no sign-in; cache up to 60 s)
+→ 200 { signupBonus, checkIn: { streak: [..], cycleDays }, ad: { coins, maxPerDay, cooldownSeconds },
+        episode: { coins }, reel: { tiers: [{ upToSeconds, coins }], longerThanLastTier, unknownLength,
+        maxPerDay, watchTokenMode, minWatchPercent }, referral: { enabled, referrerCoins, refereeCoins,
+        applyWithinDays, qualify: { requireGoogleLink, minReelsWatched } } }
+```
+Every reward response still says what was actually paid (`coinsEarned`); show that.
+
+## Reels pay by length (watch sessions)
+
+1. When a reel starts playing:
+   ```
+   POST /api/user/reward/reel/start   { reelId }         Authorization: Bearer <accessToken>
+   → 200 { watchToken, coins, durationSeconds, minWatchSeconds, alreadyClaimed }
+   → 404 REEL_NOT_FOUND
+   ```
+   Show "+{coins}" (skip if `alreadyClaimed`). Keep `watchToken` with the reel.
+2. Once at least `minWatchSeconds` have passed (e.g. when the reel finishes):
+   ```
+   POST /api/user/reward/reel?lite=1  { reelId, watchToken }   + Idempotency-Key
+   → 200 { coinsEarned, newCoinsBalance, reelSeconds, ... }
+   → 425 TOO_EARLY (Retry-After: seconds)   // claimed before minWatchSeconds; nothing used up, retry later
+   → 400 INVALID_WATCH_TOKEN                // token for another reel/user, or older than 6 h: call /start again
+   → 400 WATCH_TOKEN_REQUIRED               // admin requires watch tokens and none was sent
+   → 409 ALREADY_CLAIMED, 429 DAILY_LIMIT, 404 REEL_NOT_FOUND
+   ```
+   Measure the wait from when `/start` answered; pausing doesn't need special handling (the
+   server only checks that enough time has passed). Older app builds that send no token are
+   paid the admin's "older app versions" amount until the admin switches the check to Required.
+
+## Referrals
+
+```
+GET /api/user/referral                                Authorization: Bearer <accessToken>
+→ 200 { code, shareLink, enabled, referrerCoins, refereeCoins,
+        invited: { total, pending, rewarded, rejected }, coinsEarned,
+        myReferral: { status: "none"|"pending"|"rewarded"|"rejected", canApply, applyUntil,
+                      requirements: { googleLinked, reelsWatched, reelsNeeded } } }
+
+POST /api/user/referral/apply   { code }               Authorization: Bearer <accessToken>
+→ 200 { status: "pending"|"rewarded", refereeCoins, referral, user }
+→ 404 INVALID_CODE, 409 ALREADY_REFERRED, 403 TOO_LATE | REFERRALS_DISABLED, 400 SELF_REFERRAL | CIRCULAR
+```
+- Show the "Enter a friend's code" field only while `myReferral.canApply` is true. Codes are 7
+  characters; case, spaces and dashes are ignored.
+- A referral is paid when the new user meets `requirements` (e.g. links Google and earns rewards
+  for N reels). It happens automatically during a later claim or Google link: that response has
+  `referralBonus` (coins) and the message mentions it. Use `myReferral.requirements` to show progress.
+- The inviter sees new coins as ledger entries of type `REFERRAL_REFERRER`; the new user's are
+  `REFERRAL_REFEREE`.
+- Optional: pass the code through the Play Install Referrer (`shareLink`) and call `/apply`
+  automatically on first launch.
+
+## Reel feed: new reels first
+
+```
+GET /api/reels?sort=newest|trending|random&limit=10[&cursor=…][&dramaId=…]
+Authorization: Bearer <accessToken>    (optional)
+```
+- **Signed in:** reels the user hasn't earned coins for come first (in the chosen sort), then the
+  ones they have (newest first), so every reel still appears exactly once. Each item has
+  `rewardClaimed` (true = already paid) and the response has `personalized: true`.
+- **Not signed in:** the normal feed, as before.
+- Every item has `rewardCoins`: what that reel pays by length (with a watch token).
+- Always pass `nextCursor` back unchanged (it now looks like `n:…` / `s:…`); stop when it's `null`.
+  `sort=random` still returns `"random"` as the cursor: just ask again for more.
+- An expired token gets `401 TOKEN_EXPIRED` here too: refresh and retry. Add `personal=0` to get the
+  plain feed while signed in.
+- Responses are per user: don't cache them in a shared cache.
+- "Seen" means "earned coins for". A reel watched without a claim (e.g. after the daily limit)
+  stays in the new part, so it can still pay later.

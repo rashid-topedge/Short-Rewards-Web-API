@@ -66,8 +66,8 @@ export async function GET(req: NextRequest) {
 /**
  * POST /api/admin/reels
  * Admin: creates the reel, published or not (`isPublished`).
- * Moderator: always unpublished; `submitForReview: true` sends it for approval,
- * otherwise it's saved as a draft.
+ * Moderator: same (approval is off). APPROVAL FLOW (disabled): always
+ * unpublished; `submitForReview: true` sent it for approval, otherwise a draft.
  */
 export async function POST(req: NextRequest) {
   const auth = await requireStaff(req);
@@ -90,7 +90,10 @@ export async function POST(req: NextRequest) {
       : [];
 
     const isModerator = session.role === "moderator";
-    const submit = isModerator && (body.submitForReview === true || body.isPublished === true);
+    // APPROVAL FLOW (disabled): moderators' reels were always saved unpublished,
+    // as a draft or submitted for approval:
+    // const submit = isModerator && (body.submitForReview === true || body.isPublished === true);
+    const submit = false;
 
     const reel = await createReelAdmin({
       title: body.title,
@@ -101,18 +104,19 @@ export async function POST(req: NextRequest) {
       dramaId: body.dramaId ? Number(body.dramaId) : null,
       episodeNumber: body.episodeNumber ? Number(body.episodeNumber) : null,
       tags,
-      isPublished: isModerator ? false : Boolean(body.isPublished),
+      // APPROVAL FLOW (disabled):
+      // isPublished: isModerator ? false : Boolean(body.isPublished),
+      // reviewStatus: isModerator ? (submit ? "pending" : "draft") : null,
+      isPublished: Boolean(body.isPublished),
+      reviewStatus: null,
       createdBy: { id: session.actorId, name: session.displayName },
-      reviewStatus: isModerator ? (submit ? "pending" : "draft") : null,
     });
 
     await logActivity(actorOf(session), {
-      action: isModerator ? (submit ? "reel.submitted" : "reel.drafted") : "reel.created",
+      action: isModerator && submit ? "reel.submitted" : "reel.created",
       entityType: "reel",
       entityId: reel.reelId,
-      summary: isModerator
-        ? `${submit ? "Uploaded and submitted for approval" : "Uploaded as draft"}: "${reel.title}"`
-        : `Created reel "${reel.title}"${reel.isPublished ? " (published)" : " (draft)"}`,
+      summary: `Created reel "${reel.title}"${reel.isPublished ? " (published)" : " (draft)"}`,
     });
 
     const full = await getReelAdmin(reel.reelId);

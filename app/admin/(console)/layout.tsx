@@ -17,6 +17,8 @@ import {
   UserCog,
   History,
   KeyRound,
+  Gift,
+  UserPlus,
 } from "lucide-react";
 
 export default async function AdminLayout({
@@ -39,12 +41,17 @@ export default async function AdminLayout({
         { label: "Payouts & Redemptions", href: "/admin/payouts", icon: CreditCard },
         { label: "Users & Economy", href: "/admin/users", icon: Users },
         { label: "Transactions", href: "/admin/transactions", icon: Coins },
+        { label: "Rewards", href: "/admin/rewards", icon: Gift },
+        { label: "Referrals", href: "/admin/referrals", icon: UserPlus },
         { label: "Storage & B2 Keys", href: "/admin/settings", icon: CloudCog },
         { label: "Team", href: "/admin/team", icon: UserCog },
         { label: "Activity Log", href: "/admin/activity", icon: History },
         { label: "My Account", href: "/admin/account", icon: KeyRound },
       ]
-    : [{ label: "Reels & Shorts", href: "/admin/reels", icon: Video }];
+    : [
+        { label: "Reels & Shorts", href: "/admin/reels", icon: Video },
+        { label: "Rewards", href: "/admin/rewards", icon: Gift },
+      ];
 
   return (
     <div className="flex min-h-screen bg-[#090b10] text-[#e8ecf4] font-sans antialiased">

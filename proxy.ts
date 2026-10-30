@@ -5,12 +5,15 @@ import { getSessionSecret } from "@/lib/adminSecret";
 /**
  * Admin console page routing (pages only; every API checks the session itself).
  * - No valid session → /admin/login
- * - Moderators → only /admin/reels; anything else sends them there.
+ * - Moderators → only Reels and Rewards; anything else sends them to Reels.
  *
  * This checks the token signature (secret from the database, cached). Disabled
  * moderators and changed passwords are caught by the console layout and the
  * APIs, which also check the account.
  */
+/** Console pages moderators may open. */
+const MODERATOR_PAGES = ["/admin/reels", "/admin/rewards"];
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   if (pathname === "/admin/login" || pathname.startsWith("/admin/login/")) {
@@ -26,7 +29,8 @@ export async function proxy(request: NextRequest) {
   if (!session) {
     return NextResponse.redirect(new URL("/admin/login", request.url));
   }
-  if (session.role === "moderator" && !(pathname === "/admin/reels" || pathname.startsWith("/admin/reels/"))) {
+  const moderatorAllowed = MODERATOR_PAGES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+  if (session.role === "moderator" && !moderatorAllowed) {
     return NextResponse.redirect(new URL("/admin/reels", request.url));
   }
   return NextResponse.next();

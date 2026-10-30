@@ -15,6 +15,8 @@ declare module "backblaze-b2" {
       downloadUrl: string;
       recommendedPartSize: number;
       absoluteMinimumPartSize: number;
+      s3ApiUrl?: string;
+      allowed?: { capabilities?: string[]; bucketId?: string | null; namePrefix?: string | null };
     };
   }
 

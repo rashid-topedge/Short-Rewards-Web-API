@@ -193,6 +193,24 @@ function unauthorized(code: string, message: string): UserAuthResult {
  * @param legacyUserId the userId old app builds send in the body/query; only
  *   used when there is no token and legacy mode is on.
  */
+/**
+ * For endpoints that work without sign-in but can personalise (e.g. the reel
+ * feed): the user from a valid Bearer token, "expired" if the token expired
+ * (so the app can refresh and retry), or null (no/invalid token → anonymous).
+ */
+export function optionalUser(req: NextRequest): { userId: string } | "expired" | null {
+  const token = getBearerToken(req);
+  if (!token) return null;
+  const check = verifyAccessToken(token);
+  if (check.ok) return { userId: check.userId };
+  if (check.reason === "expired") return "expired";
+  if (legacyAllowed()) {
+    const legacyUser = verifyLegacyToken(token);
+    if (legacyUser) return { userId: legacyUser };
+  }
+  return null;
+}
+
 export async function requireUser(req: NextRequest, legacyUserId?: unknown): Promise<UserAuthResult> {
   const token = getBearerToken(req);
 

@@ -675,52 +675,12 @@ export default function AdminSettingsPage() {
               </p>
             </div>
 
-            <div className="space-y-1">
-              <label className="font-semibold text-neutral-300">Max Ad Rewards per User per Day</label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  value={form.maxAdRewardsPerDay}
-                  onChange={(e) => setForm({ ...form, maxAdRewardsPerDay: Math.max(0, parseInt(e.target.value, 10) || 0) })}
-                  className="w-full px-3 py-2 rounded-xl bg-[#141b2b] border border-[#232f46] text-white focus:outline-none focus:border-amber-500 font-mono text-sm"
-                />
-                <span className="absolute right-3 top-2.5 text-neutral-400 text-xs font-bold">Ads</span>
-              </div>
-              <p className="text-[11px] text-neutral-400">Up to {form.maxAdRewardsPerDay * 25} coins/day from ads (25 each). 0 disables ad rewards.</p>
-            </div>
-
-            <div className="space-y-1">
-              <label className="font-semibold text-neutral-300">Cooldown Between Ad Rewards</label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="5"
-                  min="0"
-                  value={form.adRewardCooldownSeconds}
-                  onChange={(e) => setForm({ ...form, adRewardCooldownSeconds: Math.max(0, parseInt(e.target.value, 10) || 0) })}
-                  className="w-full px-3 py-2 rounded-xl bg-[#141b2b] border border-[#232f46] text-white focus:outline-none focus:border-amber-500 font-mono text-sm"
-                />
-                <span className="absolute right-3 top-2.5 text-neutral-400 text-xs font-bold">Sec</span>
-              </div>
-              <p className="text-[11px] text-neutral-400">Minimum wait between two ad rewards for the same user.</p>
-            </div>
-
-            <div className="space-y-1">
-              <label className="font-semibold text-neutral-300">Max Reel Rewards per User per Day</label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  value={form.maxReelRewardsPerDay}
-                  onChange={(e) => setForm({ ...form, maxReelRewardsPerDay: Math.max(0, parseInt(e.target.value, 10) || 0) })}
-                  className="w-full px-3 py-2 rounded-xl bg-[#141b2b] border border-[#232f46] text-white focus:outline-none focus:border-amber-500 font-mono text-sm"
-                />
-                <span className="absolute right-3 top-2.5 text-neutral-400 text-xs font-bold">Reels</span>
-              </div>
-              <p className="text-[11px] text-neutral-400">Up to {form.maxReelRewardsPerDay * 5} coins/day from reels (5 each, once per reel). 0 disables reel rewards.</p>
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-[12px] text-neutral-300">
+              Coin amounts and daily limits for check-ins, ads, episodes, reels and referrals are on the{" "}
+              <a href="/admin/rewards" className="font-semibold text-amber-300 underline underline-offset-2 hover:text-amber-200">
+                Rewards page
+              </a>
+              .
             </div>
           </div>
         </div>

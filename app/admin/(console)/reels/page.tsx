@@ -32,6 +32,8 @@ import { useCursorPager } from "@/components/admin/useCursorPager";
 import ReelUploadDialog, { PublishSwitch, TextField } from "@/components/admin/ReelUploadDialog";
 import { inspectVideo, uploadFileChunked } from "@/lib/chunkUpload";
 import type { AdminReelItem, ReelChanges } from "@/lib/types";
+import { reelCoinsForDuration, type RewardConfig } from "@/lib/rewardConfig";
+import { MODERATOR_APPROVAL_REQUIRED } from "@/lib/moderation";
 
 /** List items carry permissions for the signed-in user and signed preview URLs. */
 type AdminReel = AdminReelItem;
@@ -59,6 +61,14 @@ export default function AdminReelsPage() {
   const [mineOnly, setMineOnly] = useState(false);
   const [me, setMe] = useState<Me | null>(null);
   const [reviewing, setReviewing] = useState<AdminReel | null>(null);
+  // Reel coins by length, to show what each reel pays.
+  const [reelRewards, setReelRewards] = useState<RewardConfig["reel"] | null>(null);
+  useEffect(() => {
+    fetch("/api/user/rewards/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((c: { reel?: RewardConfig["reel"] } | null) => c?.reel && setReelRewards(c.reel))
+      .catch(() => {});
+  }, []);
   const pager = useCursorPager();
   const { cursor, reset: resetPager, setNextCursor } = pager;
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -72,6 +82,8 @@ export default function AdminReelsPage() {
   const searchId = useId();
   const isAdmin = me?.role === "admin";
   const isModerator = me?.role === "moderator";
+  // APPROVAL FLOW: true only while moderator reels need admin approval (currently off).
+  const moderatorNeedsApproval = isModerator && MODERATOR_APPROVAL_REQUIRED;
 
   const fetchMe = useCallback(async () => {
     try {
@@ -155,7 +167,7 @@ export default function AdminReelsPage() {
   /** Admin: publish/unpublish. Moderator: hide own live reel. */
   const togglePublish = async (reel: AdminReel) => {
     const next = !reel.isPublished;
-    if (!next && isModerator && !window.confirm(`Hide "${reel.title}" from the app? It will need approval to go live again.`)) {
+    if (!next && moderatorNeedsApproval && !window.confirm(`Hide "${reel.title}" from the app? It will need approval to go live again.`)) {
       return;
     }
     const res = await fetch(`/api/admin/reels/${reel.reelId}`, {
@@ -209,8 +221,10 @@ export default function AdminReelsPage() {
             <Video className="h-6 w-6 text-purple-300" aria-hidden="true" /> Short reels
           </h1>
           <p className="mt-1 text-sm text-neutral-300">
-            {isModerator
+            {moderatorNeedsApproval
               ? "Upload vertical videos and edit your own reels. New reels and changes to live reels go live after an admin approves them."
+              : isModerator
+              ? "Upload vertical videos, edit your own reels and choose when they go live."
               : "Upload vertical videos, edit their details and control what's live."}
           </p>
         </div>
@@ -431,6 +445,7 @@ export default function AdminReelsPage() {
               onTogglePublish={() => togglePublish(reel)}
               onSubmit={() => submitForReview(reel)}
               onReview={() => setReviewing(reel)}
+              coins={reelRewards ? reelCoinsForDuration(reelRewards, reel.durationSeconds) : null}
             />
           ))}
         </ul>
@@ -464,11 +479,11 @@ export default function AdminReelsPage() {
       <ReelUploadDialog
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
-        moderator={isModerator}
+        moderator={moderatorNeedsApproval}
         onSaved={() => {
           resetPager();
           refresh();
-          setNotice(isModerator ? "New reels saved. Ones you submitted are now waiting for approval." : "New reels saved.");
+          setNotice(moderatorNeedsApproval ? "New reels saved. Ones you submitted are now waiting for approval." : "New reels saved.");
         }}
       />
 
@@ -476,7 +491,7 @@ export default function AdminReelsPage() {
 
       <ReelEditDialog
         reel={editing}
-        moderator={isModerator}
+        moderator={moderatorNeedsApproval}
         onClose={() => setEditing(null)}
         onSaved={(msg) => {
           setEditing(null);
@@ -524,7 +539,9 @@ function ReelCard({
   onTogglePublish,
   onSubmit,
   onReview,
+  coins,
 }: {
+  coins: number | null;
   reel: AdminReel;
   selectable: boolean;
   selected: boolean;
@@ -586,10 +603,19 @@ function ReelCard({
         </button>
 
         <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between text-xs font-semibold text-white">
-          <span className="flex items-center gap-1 rounded-md bg-black/70 px-2 py-0.5">
+          <span
+            className={`flex items-center gap-1 rounded-md px-2 py-0.5 ${reel.durationSeconds ? "bg-black/70" : "bg-amber-400 text-black"}`}
+            title={reel.durationSeconds ? undefined : "Length unknown: pays the 'length unknown' amount. Re-upload or edit the length."}
+          >
             <Clock className="h-3 w-3" aria-hidden="true" />
             <span className="sr-only">Duration </span>
-            {reel.durationSeconds}s
+            {reel.durationSeconds ? `${reel.durationSeconds}s` : "Length?"}
+            {coins !== null && (
+              <span className="ml-1 font-bold text-amber-300" style={reel.durationSeconds ? undefined : { color: "inherit" }}>
+                +{coins}
+                <span className="sr-only"> coins</span>
+              </span>
+            )}
           </span>
           <span className="flex items-center gap-1 rounded-md bg-black/70 px-2 py-0.5">
             <Heart className="h-3 w-3 text-rose-300" aria-hidden="true" />

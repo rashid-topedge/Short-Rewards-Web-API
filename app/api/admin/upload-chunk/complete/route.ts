@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireStaff } from "@/lib/auth";
 import { canUploadTo } from "@/lib/reelPermissions";
-import { FolderType, b2FinishLargeFile, b2PublicUrl, getUrlSigner } from "@/lib/b2";
+import { FolderType, b2FileExists, b2FinishLargeFile, b2PublicUrl, getUrlSigner } from "@/lib/b2";
 import {
   createReelAdmin,
+  deleteUploadPart,
   deleteUploadSession,
   getUploadPartSha1s,
   getUploadSession,
@@ -56,6 +57,15 @@ export async function POST(req: NextRequest) {
     const folderType = session.folderType as FolderType;
     if (session.b2FileId) {
       await b2FinishLargeFile(folderType, session.b2FileId, parts.map((p) => p.sha1));
+    } else if (parts[0]?.sha1 === "direct" && !(await b2FileExists(folderType, session.b2FileName))) {
+      // The browser said it uploaded the file directly, but it isn't in storage.
+      await transitionUploadSession(sessionId, "completing", "uploading").catch(() => {});
+      claimed = false;
+      await deleteUploadPart(sessionId, 0);
+      return NextResponse.json(
+        { error: "The file didn't reach storage. Please try the upload again.", missingChunks: [0] },
+        { status: 400 }
+      );
     }
     const finalUrl = await b2PublicUrl(folderType, session.b2FileName);
 

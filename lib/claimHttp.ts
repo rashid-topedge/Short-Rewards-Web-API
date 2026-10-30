@@ -41,6 +41,16 @@ export function claimResponse(result: {
     }
     case "CLAIM_ID_REUSED":
       return NextResponse.json(result, { status: 422 });
+    case "REEL_NOT_FOUND":
+      return NextResponse.json(result, { status: 404 });
+    case "TOO_EARLY": {
+      const headers: Record<string, string> = {};
+      if (result.retryAfterSeconds) headers["Retry-After"] = String(result.retryAfterSeconds);
+      return NextResponse.json(result, { status: 425, headers });
+    }
+    case "INVALID_WATCH_TOKEN":
+    case "WATCH_TOKEN_REQUIRED":
+      return NextResponse.json(result, { status: 400 });
     default:
       return NextResponse.json(result);
   }

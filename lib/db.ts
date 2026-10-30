@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { createClient } from "@libsql/client";
 
 import type {
@@ -20,6 +21,14 @@ import type {
   RedemptionStatus,
   SystemSettings,
 } from "@/lib/types";
+import {
+  DEFAULT_REWARD_CONFIG,
+  minWatchSeconds,
+  parseRewardConfig,
+  reelCoinsForDuration,
+  type RewardConfig,
+} from "@/lib/rewardConfig";
+import { readWatchToken } from "@/lib/watchToken";
 
 // Thin facade over the async libSQL client.
 type InValue = null | string | number | boolean | Uint8Array;
@@ -123,6 +132,11 @@ interface UserRow {
   updated_at: number;
   google_sub?: string | null;
   google_email?: string | null;
+  referral_code?: string | null;
+  referred_by?: string | null;
+  referral_status?: string | null;
+  referral_count?: number;
+  referral_coins?: number;
 }
 
 interface TransactionRow {
@@ -152,15 +166,6 @@ interface RedemptionRow {
   processed_at: number | null;
 }
 
-const STREAK_REWARDS: Record<number, number> = {
-  1: 10,
-  2: 20,
-  3: 30,
-  4: 50,
-  5: 70,
-  6: 100,
-  7: 200,
-};
 
 // The client and schema setup are created once per process. Caching the
 // promise (not the result) means concurrent cold-start requests share one init.
@@ -223,7 +228,7 @@ async function initDb(): Promise<DbApi> {
 
 // Bump this whenever `statements` below changes. On a cold start we read one
 // row instead of re-running ~40 DDL statements against Turso.
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 async function createSchema(db: QueryApi): Promise<void> {
   await db.run(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
@@ -380,6 +385,29 @@ async function createSchema(db: QueryApi): Promise<void> {
       PRIMARY KEY (user_id, claim_id)
     )`,
     `CREATE INDEX IF NOT EXISTS idx_claim_keys_created ON reward_claim_keys (created_at)`,
+    // ---- v11: referrals
+    `ALTER TABLE users ADD COLUMN referral_code TEXT`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code ON users (referral_code) WHERE referral_code IS NOT NULL`,
+    `ALTER TABLE users ADD COLUMN referred_by TEXT`,
+    // NULL = not referred; 'pending' | 'rewarded' | 'rejected' for the referred (new) user
+    `ALTER TABLE users ADD COLUMN referral_status TEXT`,
+    `ALTER TABLE users ADD COLUMN referral_count INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE users ADD COLUMN referral_coins INTEGER NOT NULL DEFAULT 0`,
+    `CREATE INDEX IF NOT EXISTS idx_users_top_referrers ON users (referral_count) WHERE referral_count > 0`,
+    `CREATE TABLE IF NOT EXISTS referrals (
+      referee_user_id TEXT PRIMARY KEY,
+      referrer_user_id TEXT NOT NULL,
+      code TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at REAL NOT NULL,
+      rewarded_at REAL,
+      referrer_coins INTEGER NOT NULL DEFAULT 0,
+      referee_coins INTEGER NOT NULL DEFAULT 0,
+      note TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals (referrer_user_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_referrals_status ON referrals (status, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_referrals_created ON referrals (created_at, referee_user_id)`,
     // ---- v10: console settings kept in the database (session-signing secret)
     `CREATE TABLE IF NOT EXISTS admin_config (
       key TEXT PRIMARY KEY,
@@ -645,6 +673,52 @@ async function loadSystemSettings(): Promise<SystemSettings> {
   };
 }
 
+// ------------------------------------------------------------------
+// Reward amounts (admin → Rewards). One JSON document in admin_config,
+// cached per process like the settings, so rewards cost no extra reads.
+
+const REWARD_CONFIG_KEY = "reward_config";
+let rewardConfigCache: { value: RewardConfig; expiresAt: number } | null = null;
+
+export async function getRewardConfig(): Promise<RewardConfig> {
+  if (rewardConfigCache && rewardConfigCache.expiresAt > Date.now()) return rewardConfigCache.value;
+  const value = await loadRewardConfig();
+  rewardConfigCache = { value, expiresAt: Date.now() + SETTINGS_TTL_MS };
+  return value;
+}
+
+/** The last loaded config (or the defaults), without waiting. For code inside transactions. */
+function currentRewardConfig(): RewardConfig {
+  return rewardConfigCache?.value ?? DEFAULT_REWARD_CONFIG;
+}
+
+async function loadRewardConfig(): Promise<RewardConfig> {
+  const stored = await getAdminConfig(REWARD_CONFIG_KEY);
+  if (stored) {
+    try {
+      const parsed = parseRewardConfig(JSON.parse(stored));
+      if (parsed.ok) return parsed.config;
+      console.error("Stored reward config is invalid; using defaults:", parsed.errors);
+    } catch (err) {
+      console.error("Stored reward config is unreadable; using defaults:", err);
+    }
+    return DEFAULT_REWARD_CONFIG;
+  }
+  // Not edited yet: today's amounts, with the daily limits from the older settings.
+  const s = await getSystemSettings();
+  return {
+    ...DEFAULT_REWARD_CONFIG,
+    ad: { ...DEFAULT_REWARD_CONFIG.ad, maxPerDay: s.maxAdRewardsPerDay, cooldownSeconds: s.adRewardCooldownSeconds },
+    reel: { ...DEFAULT_REWARD_CONFIG.reel, maxPerDay: s.maxReelRewardsPerDay },
+  };
+}
+
+export async function saveRewardConfig(config: RewardConfig): Promise<RewardConfig> {
+  await setAdminConfig(REWARD_CONFIG_KEY, JSON.stringify(config));
+  rewardConfigCache = null;
+  return getRewardConfig();
+}
+
 export async function updateSystemSettings(updates: Partial<SystemSettings>): Promise<SystemSettings> {
   const db = await getDb();
   const now = Date.now();
@@ -698,6 +772,7 @@ export async function updateSystemSettings(updates: Partial<SystemSettings>): Pr
   }
 
   settingsCache = null;
+  rewardConfigCache = null; // limits fall back to these settings until the reward config is saved
   return getSystemSettings();
 }
 
@@ -999,13 +1074,12 @@ function effectiveStreak(streakDay: number, lastCheckInDate: string | null, toda
   return 0;
 }
 
-const SIGNUP_BONUS_COINS = 50;
-const AD_REWARD_COINS = 25;
-const EPISODE_REWARD_COINS = 15;
-const REEL_REWARD_COINS = 5;
-
-/** Creates the user (with signup bonus) if missing. Safe to call concurrently. */
+/**
+ * Creates the user (with signup bonus) if missing. Safe to call concurrently.
+ * Callers load the reward config before their transaction (getRewardConfig()).
+ */
 async function ensureUser(tx: QueryApi, userId: string, now: number): Promise<boolean> {
+  const SIGNUP_BONUS_COINS = currentRewardConfig().signupBonus;
   const inserted = await tx.run(
     `
     INSERT INTO users (user_id, coins, streak_day, last_check_in_date, created_at, updated_at)
@@ -1094,6 +1168,7 @@ async function creditCoins(
 
 export async function getOrCreateUser(userId: string): Promise<UserProfile> {
   const db = await getDb();
+  await getRewardConfig(); // signup bonus for a new account
   const todayIso = getTodayIso();
 
   // User row + recent transactions in a single round trip.
@@ -1130,6 +1205,7 @@ export async function isUserClaimed(userId: string): Promise<boolean> {
  */
 export async function claimUser(userId: string): Promise<boolean> {
   const db = await getDb();
+  await getRewardConfig(); // signup bonus for a new account
   const now = Date.now();
   return db.tx(async (tx) => {
     await ensureUser(tx, userId, now);
@@ -1171,6 +1247,8 @@ function mapProfileTransactions(txRows: unknown[]): CoinTransaction[] {
         }
 
         const validTypes: CoinTransaction["type"][] = [
+          "REFERRAL_REFERRER",
+          "REFERRAL_REFEREE",
           "DAILY_CHECKIN",
           "EPISODE_WATCHED",
           "REWARD_AD",
@@ -1200,18 +1278,21 @@ function mapProfileTransactions(txRows: unknown[]): CoinTransaction[] {
 /** Builds the profile from rows already loaded (no queries). */
 function buildUserProfile(userRow: UserRow, txRows: unknown[], todayIso: string): UserProfile {
   const canCheckInToday = userRow.last_check_in_date !== todayIso;
-  const currentStreak = effectiveStreak(userRow.streak_day, userRow.last_check_in_date, todayIso);
-  const nextDay = currentStreak >= 7 ? 1 : currentStreak + 1;
-  const nextReward = STREAK_REWARDS[nextDay] || 10;
+  const streak = currentRewardConfig().checkIn.streak;
+  const cycle = streak.length;
+  const currentStreak = Math.min(effectiveStreak(userRow.streak_day, userRow.last_check_in_date, todayIso), cycle);
+  const nextDay = currentStreak >= cycle ? 1 : currentStreak + 1;
+  const nextReward = streak[nextDay - 1] ?? 0;
 
-  const streakSchedule: StreakDayInfo[] = [1, 2, 3, 4, 5, 6, 7].map((day) => {
+  const streakSchedule: StreakDayInfo[] = streak.map((coins, i) => {
+    const day = i + 1;
     let status: "claimed" | "available" | "locked" = "locked";
     if (day <= currentStreak) {
       status = "claimed";
     } else if (day === nextDay && canCheckInToday) {
       status = "available";
     }
-    return { day, coins: STREAK_REWARDS[day], status };
+    return { day, coins, status };
   });
 
   return {
@@ -1249,7 +1330,15 @@ export type ClaimOptions = RewardOptions & {
   claimId?: string;
 };
 
-export type ClaimCode = "ALREADY_CLAIMED" | "DAILY_LIMIT" | "COOLDOWN" | "CLAIM_ID_REUSED";
+export type ClaimCode =
+  | "ALREADY_CLAIMED"
+  | "DAILY_LIMIT"
+  | "COOLDOWN"
+  | "CLAIM_ID_REUSED"
+  | "REEL_NOT_FOUND"
+  | "TOO_EARLY"
+  | "INVALID_WATCH_TOKEN"
+  | "WATCH_TOKEN_REQUIRED";
 
 const CLAIM_ID_PATTERN = /^[A-Za-z0-9_.:-]{8,128}$/;
 export function isValidClaimId(id: unknown): id is string {
@@ -1283,6 +1372,7 @@ async function runClaim<R extends { success: boolean; user: UserProfile }>(args:
   const { userId, kind, fingerprint, options } = args;
   const claimId = options.claimId;
   const db = await getDb();
+  const cfg = await getRewardConfig();
   const now = Date.now();
 
   type Outcome =
@@ -1304,6 +1394,20 @@ async function runClaim<R extends { success: boolean; user: UserProfile }>(args:
       }
 
       const body = await args.body(tx, now);
+
+      // A referred user who now meets the referral rules gets the bonus (and
+      // so does the referrer) in this same transaction. Only users with a
+      // pending referral pay for this check.
+      if (body.granted && body.row.referral_status === "pending") {
+        const paid = await qualifyReferralInTx(tx, userId, now, cfg);
+        if (paid) {
+          body.row = paid.row;
+          const r = body.result as Record<string, unknown>;
+          r.newCoinsBalance = paid.row.coins;
+          r.referralBonus = paid.refereeCoins;
+          r.message = `${String(r.message ?? "")} Referral bonus: +${paid.refereeCoins} coins!`.trim();
+        }
+      }
 
       // Remember the outcome for this claim ID, so retries get the same answer.
       if (claimId) {
@@ -1381,13 +1485,15 @@ export async function performDailyCheckIn(userId: string, options: ClaimOptions 
       };
       if (row.last_check_in_date === today) return already;
 
+      const streak = currentRewardConfig().checkIn.streak;
+      const cycle = streak.length;
       let newStreak = effectiveStreak(row.streak_day, row.last_check_in_date, today) + 1;
       let isCycleReset = false;
-      if (newStreak > 7) {
+      if (newStreak > cycle) {
         newStreak = 1;
         isCycleReset = true;
       }
-      const rewardCoins = STREAK_REWARDS[newStreak] || 10;
+      const rewardCoins = streak[newStreak - 1] ?? 0;
 
       // The date guard makes the update itself refuse a second claim, on top of
       // the write transaction serializing concurrent check-ins.
@@ -1401,7 +1507,7 @@ export async function performDailyCheckIn(userId: string, options: ClaimOptions 
       if (!updated) return already;
 
       const desc = isCycleReset
-        ? `Completed 7-day cycle! Day 1 Bonus: +${rewardCoins} coins`
+        ? `Completed ${cycle}-day cycle! Day 1 Bonus: +${rewardCoins} coins`
         : `Day ${newStreak} Daily Check-in: +${rewardCoins} coins`;
       await tx.run(
         `INSERT INTO coin_transactions (user_id, type, amount, description, created_at)
@@ -1415,7 +1521,7 @@ export async function performDailyCheckIn(userId: string, options: ClaimOptions 
         result: {
           success: true,
           message: isCycleReset
-            ? `Congratulations! 7-day cycle completed. You earned ${rewardCoins} coins and streak has reset!`
+            ? `Congratulations! ${cycle}-day cycle completed. You earned ${rewardCoins} coins and streak has reset!`
             : `Day ${newStreak} check-in claimed! +${rewardCoins} coins added.`,
           coinsEarned: rewardCoins,
           newCoinsBalance: updated.coins,
@@ -1427,7 +1533,7 @@ export async function performDailyCheckIn(userId: string, options: ClaimOptions 
   });
 }
 
-type DailyRewardKind = "AD" | "REEL";
+type DailyRewardKind = "AD" | "REEL" | "REFERRAL";
 
 /**
  * Atomically counts one more reward of `kind` for today, if the user is under
@@ -1479,7 +1585,7 @@ export async function awardRewardedAd(
   options: ClaimOptions = {}
 ): Promise<RewardResult> {
   const today = getTodayIso();
-  const settings = await getSystemSettings();
+  const { ad } = await getRewardConfig();
   return runClaim<RewardResult>({
     userId,
     kind: "ad",
@@ -1493,8 +1599,8 @@ export async function awardRewardedAd(
         "AD",
         today,
         now,
-        settings.maxAdRewardsPerDay,
-        settings.adRewardCooldownSeconds
+        ad.maxPerDay,
+        ad.cooldownSeconds
       );
       if (!slot.ok) {
         // Not remembered under the claim ID: nothing was granted.
@@ -1503,7 +1609,7 @@ export async function awardRewardedAd(
           code: slot.reason === "LIMIT" ? ("DAILY_LIMIT" as const) : ("COOLDOWN" as const),
           message:
             slot.reason === "LIMIT"
-              ? `Daily ad reward limit reached (${settings.maxAdRewardsPerDay} per day). Come back tomorrow!`
+              ? `Daily ad reward limit reached (${ad.maxPerDay} per day). Come back tomorrow!`
               : `Please wait ${slot.retryAfterSeconds}s before claiming another ad reward.`,
           coinsEarned: 0,
           newCoinsBalance: 0,
@@ -1511,14 +1617,14 @@ export async function awardRewardedAd(
           retryAfterSeconds: slot.retryAfterSeconds,
         });
       }
-      const row = await creditCoins(tx, userId, AD_REWARD_COINS, "REWARD_AD", `Watched Sponsored Video Ad (${adType})`, now);
+      const row = await creditCoins(tx, userId, ad.coins, "REWARD_AD", `Watched Sponsored Video Ad (${adType})`, now);
       return {
         granted: true,
         row,
         result: {
           success: true,
-          message: `Watched reward ad successfully! +${AD_REWARD_COINS} coins added.`,
-          coinsEarned: AD_REWARD_COINS,
+          message: `Watched reward ad successfully! +${ad.coins} coins added.`,
+          coinsEarned: ad.coins,
           newCoinsBalance: row.coins,
         },
       };
@@ -1533,6 +1639,7 @@ export async function awardEpisodeWatched(
   options: ClaimOptions = {}
 ): Promise<RewardResult> {
   const description = `Watched episode ${ep} of drama #${dramaId}`;
+  const episodeCoins = (await getRewardConfig()).episode.coins;
   return runClaim<RewardResult>({
     userId,
     kind: "episode",
@@ -1566,14 +1673,14 @@ export async function awardEpisodeWatched(
           },
         };
       }
-      const row = await creditCoins(tx, userId, EPISODE_REWARD_COINS, "EPISODE_WATCHED", description, now);
+      const row = await creditCoins(tx, userId, episodeCoins, "EPISODE_WATCHED", description, now);
       return {
         granted: true,
         row,
         result: {
           success: true,
-          message: `Finished episode ${ep}! +${EPISODE_REWARD_COINS} coins added.`,
-          coinsEarned: EPISODE_REWARD_COINS,
+          message: `Finished episode ${ep}! +${episodeCoins} coins added.`,
+          coinsEarned: episodeCoins,
           newCoinsBalance: row.coins,
         },
       };
@@ -1581,13 +1688,68 @@ export async function awardEpisodeWatched(
   });
 }
 
+export type ReelClaimOptions = ClaimOptions & {
+  /** From POST /api/user/reward/reel/start (see reward config → reel.watchTokenMode). */
+  watchToken?: string;
+};
+
+/** Length and coins of a published reel, for the app and for claims. Null if not found/unpublished. */
+export async function getReelRewardInfo(
+  userId: string,
+  reelId: number
+): Promise<{ durationSeconds: number; coins: number; minWatchSeconds: number; alreadyClaimed: boolean } | null> {
+  const db = await getDb();
+  const cfg = await getRewardConfig();
+  const [reelRows, claimedRows] = await db.batch(
+    [
+      { sql: "SELECT duration_seconds FROM reels WHERE reel_id = ? AND is_published = 1", args: [reelId] },
+      { sql: "SELECT 1 AS hit FROM user_reel_rewards WHERE user_id = ? AND reel_id = ?", args: [userId, reelId] },
+    ],
+    "read"
+  );
+  const reel = reelRows[0] as { duration_seconds: number | null } | undefined;
+  if (!reel) return null;
+  const durationSeconds = reel.duration_seconds || 0;
+  return {
+    durationSeconds,
+    coins: reelCoinsForDuration(cfg.reel, durationSeconds),
+    minWatchSeconds: cfg.reel.watchTokenMode === "off" ? 0 : minWatchSeconds(cfg.reel, durationSeconds),
+    alreadyClaimed: claimedRows.length > 0,
+  };
+}
+
+/**
+ * Pays for a reel by its length (admin-set tiers). With a watch token the
+ * claim must come after the minimum watch time; see RewardConfig.reel.
+ */
 export async function awardReelWatched(
   userId: string,
   reelId: number,
-  options: ClaimOptions = {}
+  options: ReelClaimOptions = {}
 ): Promise<RewardResult> {
   const today = getTodayIso();
-  const settings = await getSystemSettings();
+  const { reel: cfg } = await getRewardConfig();
+  const db = await getDb();
+  const reelRow = (await db.get("SELECT duration_seconds FROM reels WHERE reel_id = ? AND is_published = 1", [reelId])) as
+    | { duration_seconds: number | null }
+    | undefined;
+  if (!reelRow) {
+    const user = await profileAfterWrite(userId, undefined, options);
+    return {
+      success: false,
+      code: "REEL_NOT_FOUND",
+      message: "This reel isn't available.",
+      coinsEarned: 0,
+      newCoinsBalance: user.coins,
+      user,
+    };
+  }
+  const durationSeconds = reelRow.duration_seconds || 0;
+
+  const refuse = (code: ClaimCode, message: string, extra: { retryAfterSeconds?: number; limitReason?: "LIMIT" } = {}) => {
+    throw new ClaimRejected({ success: false, code, message, coinsEarned: 0, newCoinsBalance: 0, ...extra });
+  };
+
   return runClaim<RewardResult>({
     userId,
     kind: "reel",
@@ -1595,6 +1757,31 @@ export async function awardReelWatched(
     options,
     mismatch: () => claimIdReused("reel"),
     body: async (tx, now) => {
+      // Work out what this claim pays (checked before anything is written).
+      let coins = reelCoinsForDuration(cfg, durationSeconds);
+      let paidBy = "length";
+      if (cfg.watchTokenMode !== "off") {
+        if (options.watchToken) {
+          const check = readWatchToken(options.watchToken, userId, reelId, now);
+          if (!check.ok) {
+            refuse("INVALID_WATCH_TOKEN", "This watch session isn't valid for this reel. Start the reel again.");
+          } else {
+            const need = minWatchSeconds(cfg, durationSeconds);
+            const elapsed = (now - check.startedAt) / 1000;
+            if (elapsed < need) {
+              refuse("TOO_EARLY", `Keep watching: the reward unlocks after ${need} seconds.`, {
+                retryAfterSeconds: Math.max(1, Math.ceil(need - elapsed)),
+              });
+            }
+          }
+        } else if (cfg.watchTokenMode === "required") {
+          refuse("WATCH_TOKEN_REQUIRED", "Please update the app to earn reel rewards.");
+        } else {
+          coins = cfg.noTokenCoins;
+          paidBy = "no-token";
+        }
+      }
+
       // The primary key on (user_id, reel_id) refuses a second claim from any device.
       const claim = await tx.run(
         `INSERT INTO user_reel_rewards (user_id, reel_id, created_at)
@@ -1616,28 +1803,26 @@ export async function awardReelWatched(
         };
       }
 
-      const slot = await takeDailyRewardSlot(tx, userId, "REEL", today, now, settings.maxReelRewardsPerDay);
+      const slot = await takeDailyRewardSlot(tx, userId, "REEL", today, now, cfg.maxPerDay);
       if (!slot.ok) {
         // Roll back the reel claim so this reel can still be rewarded tomorrow.
-        throw new ClaimRejected({
-          success: false,
-          code: "DAILY_LIMIT" as const,
-          message: `Daily reel reward limit reached (${settings.maxReelRewardsPerDay} per day). Come back tomorrow!`,
-          coinsEarned: 0,
-          newCoinsBalance: 0,
-          limitReason: "LIMIT" as const,
+        refuse("DAILY_LIMIT", `Daily reel reward limit reached (${cfg.maxPerDay} per day). Come back tomorrow!`, {
+          limitReason: "LIMIT",
         });
       }
 
-      const row = await creditCoins(tx, userId, REEL_REWARD_COINS, "REEL_WATCHED", `Watched Short Reel #${reelId}`, now);
+      const lengthLabel = durationSeconds ? ` (${durationSeconds}s)` : "";
+      const row = await creditCoins(tx, userId, coins, "REEL_WATCHED", `Watched Short Reel #${reelId}${lengthLabel}`, now);
       return {
         granted: true,
         row,
         result: {
           success: true,
-          message: `Watched short reel! +${REEL_REWARD_COINS} coins added.`,
-          coinsEarned: REEL_REWARD_COINS,
+          message: `Watched short reel! +${coins} coins added.`,
+          coinsEarned: coins,
           newCoinsBalance: row.coins,
+          reelSeconds: durationSeconds,
+          paidBy,
         },
       };
     },
@@ -1661,6 +1846,7 @@ export async function createRedemptionRequest(data: {
   const db = await getDb();
   const now = Date.now();
   const settings = await getSystemSettings();
+  await getRewardConfig(); // signup bonus if the account is new
 
   if (!Number.isInteger(data.coinsAmount) || data.coinsAmount < settings.minRedeemCoins) {
     return {
@@ -2857,6 +3043,11 @@ export async function recordUploadPart(sessionId: string, chunkIndex: number, sh
   return listUploadedChunks(sessionId);
 }
 
+export async function deleteUploadPart(sessionId: string, chunkIndex: number): Promise<void> {
+  const db = await getDb();
+  await db.run("DELETE FROM upload_session_parts WHERE session_id = ? AND chunk_index = ?", [sessionId, chunkIndex]);
+}
+
 export async function listUploadedChunks(sessionId: string): Promise<number[]> {
   const db = await getDb();
   const rows = (await db.all(
@@ -2919,6 +3110,7 @@ export type LinkGoogleResult =
 /** Links a Google account to an existing app account. Atomic; safe under concurrent calls. */
 export async function linkGoogleAccount(userId: string, googleSub: string, email: string | null): Promise<LinkGoogleResult> {
   const db = await getDb();
+  await getRewardConfig(); // signup bonus for a new account
   const now = Date.now();
   return db.tx(async (tx) => {
     await ensureUser(tx, userId, now);
@@ -2956,6 +3148,7 @@ export async function findOrCreateUserForGoogle(
   newUserId: string
 ): Promise<{ userId: string; created: boolean }> {
   const db = await getDb();
+  await getRewardConfig(); // signup bonus for a new account
   const now = Date.now();
   return db.tx(async (tx) => {
     const owner = (await tx.get("SELECT user_id FROM users WHERE google_sub = ?", [googleSub])) as
@@ -3002,6 +3195,7 @@ export async function resolveFirebaseUser(input: {
   legacyUserId?: string | null;
 }): Promise<ResolveFirebaseUserResult> {
   const db = await getDb();
+  await getRewardConfig(); // signup bonus for a new account
   const now = Date.now();
   const { uid, googleSub, googleEmail } = input;
 
@@ -3957,4 +4151,400 @@ export async function reviewReel(
     decision: decision === "approve" ? "approved" : "rejected",
     reel: reel!,
   };
+}
+
+// ==========================================
+// REFERRALS
+// ==========================================
+// A user shares their code; a new user enters it within N days of creating
+// their account. Both are paid once the new user qualifies (rules in the
+// reward config), never at signup, because anonymous accounts are free to
+// create. Payment happens inside the claim that makes the new user qualify
+// (or when they link Google), with a conditional status update so it can
+// never pay twice.
+
+const REFERRAL_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O, 1/I/L
+const REFERRAL_CODE_LENGTH = 7;
+
+export function normalizeReferralCode(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const code = raw.toUpperCase().replace(/[\s-]/g, "");
+  return code.length === REFERRAL_CODE_LENGTH && [...code].every((c) => REFERRAL_ALPHABET.includes(c)) ? code : null;
+}
+
+function newReferralCode(): string {
+  const bytes = crypto.randomBytes(REFERRAL_CODE_LENGTH);
+  return Array.from(bytes, (b) => REFERRAL_ALPHABET[b % REFERRAL_ALPHABET.length]).join("");
+}
+
+/** The user's referral code, created on first use. */
+async function ensureReferralCode(userId: string): Promise<string> {
+  const db = await getDb();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const row = (await db.get("SELECT referral_code FROM users WHERE user_id = ?", [userId])) as
+      | { referral_code: string | null }
+      | undefined;
+    if (row?.referral_code) return row.referral_code;
+    try {
+      await db.run("UPDATE users SET referral_code = ? WHERE user_id = ? AND referral_code IS NULL", [newReferralCode(), userId]);
+    } catch (err) {
+      // Code already taken by someone else: try another.
+      if (!/UNIQUE|constraint/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+  }
+  throw new Error("Couldn't create a referral code");
+}
+
+type ReferralPayout = { row: UserRow; refereeCoins: number; referrerCoins: number; referrerUserId: string };
+
+/**
+ * Pays a pending referral if the referred user now qualifies (or always, with
+ * `force`, for an admin approving it by hand). Must run inside a write
+ * transaction. Returns the referred user's updated row, or null if nothing was paid.
+ */
+async function qualifyReferralInTx(
+  tx: QueryApi,
+  refereeId: string,
+  now: number,
+  cfg: RewardConfig,
+  opts: { force?: boolean } = {}
+): Promise<ReferralPayout | null> {
+  const r = cfg.referral;
+  if (!r.enabled && !opts.force) return null;
+  const ref = (await tx.get("SELECT referrer_user_id FROM referrals WHERE referee_user_id = ? AND status = 'pending'", [
+    refereeId,
+  ])) as { referrer_user_id: string } | undefined;
+  if (!ref) return null;
+
+  if (!opts.force) {
+    if (r.qualify.requireGoogleLink) {
+      const me = (await tx.get("SELECT google_sub FROM users WHERE user_id = ?", [refereeId])) as
+        | { google_sub: string | null }
+        | undefined;
+      if (!me?.google_sub) return null;
+    }
+    if (r.qualify.minReelsWatched > 0) {
+      const seen = (await tx.get(
+        "SELECT COUNT(*) AS n FROM (SELECT 1 FROM user_reel_rewards WHERE user_id = ? LIMIT ?)",
+        [refereeId, r.qualify.minReelsWatched]
+      )) as { n: number };
+      if (seen.n < r.qualify.minReelsWatched) return null;
+    }
+    const referrer = (await tx.get("SELECT referral_count FROM users WHERE user_id = ?", [ref.referrer_user_id])) as
+      | { referral_count: number | null }
+      | undefined;
+    if (!referrer) return null;
+    // Over the referrer's caps: stays pending and is paid on a later claim/day.
+    if (r.maxRewardsPerReferrer > 0 && (referrer.referral_count ?? 0) >= r.maxRewardsPerReferrer) return null;
+    const slot = await takeDailyRewardSlot(tx, ref.referrer_user_id, "REFERRAL", getTodayIso(), now, r.maxRewardsPerReferrerPerDay);
+    if (!slot.ok) return null;
+  }
+
+  const marked = await tx.run(
+    `UPDATE referrals SET status = 'rewarded', rewarded_at = ?, referrer_coins = ?, referee_coins = ?
+     WHERE referee_user_id = ? AND status = 'pending'`,
+    [now, r.referrerCoins, r.refereeCoins, refereeId]
+  );
+  if (marked.changes !== 1) return null;
+
+  if (r.refereeCoins > 0) {
+    await creditCoins(tx, refereeId, r.refereeCoins, "REFERRAL_REFEREE", "Referral bonus for joining with a friend's code", now);
+  }
+  const row = (await tx.get("UPDATE users SET referral_status = 'rewarded' WHERE user_id = ? RETURNING *", [refereeId])) as UserRow;
+
+  if (r.referrerCoins > 0) {
+    await creditCoins(tx, ref.referrer_user_id, r.referrerCoins, "REFERRAL_REFERRER", "Referral bonus: a friend you invited joined", now);
+  }
+  await tx.run("UPDATE users SET referral_count = referral_count + 1, referral_coins = referral_coins + ? WHERE user_id = ?", [
+    r.referrerCoins,
+    ref.referrer_user_id,
+  ]);
+  invalidateCounts("referrals");
+  return { row, refereeCoins: r.refereeCoins, referrerCoins: r.referrerCoins, referrerUserId: ref.referrer_user_id };
+}
+
+/** Checks a pending referral outside a claim (e.g. right after linking Google). */
+export async function checkReferralQualification(userId: string): Promise<{ paid: boolean; refereeCoins: number }> {
+  const db = await getDb();
+  const status = (await db.get("SELECT referral_status FROM users WHERE user_id = ?", [userId])) as
+    | { referral_status: string | null }
+    | undefined;
+  if (status?.referral_status !== "pending") return { paid: false, refereeCoins: 0 };
+  const cfg = await getRewardConfig();
+  const paid = await db.tx((tx) => qualifyReferralInTx(tx, userId, Date.now(), cfg));
+  return { paid: Boolean(paid), refereeCoins: paid?.refereeCoins ?? 0 };
+}
+
+export type ApplyReferralResult =
+  | { ok: true; status: "pending" | "rewarded"; refereeCoins: number }
+  | {
+      ok: false;
+      code: "REFERRALS_DISABLED" | "INVALID_CODE" | "SELF_REFERRAL" | "ALREADY_REFERRED" | "TOO_LATE" | "CIRCULAR";
+      message: string;
+    };
+
+/** A new user enters a friend's code. Pays at once if they already qualify. */
+export async function applyReferralCode(userId: string, rawCode: unknown): Promise<ApplyReferralResult> {
+  const cfg = await getRewardConfig();
+  if (!cfg.referral.enabled) {
+    return { ok: false, code: "REFERRALS_DISABLED", message: "Referral codes aren't available right now." };
+  }
+  const code = normalizeReferralCode(rawCode);
+  if (!code) return { ok: false, code: "INVALID_CODE", message: "That code isn't valid. Check it and try again." };
+
+  const db = await getDb();
+  const now = Date.now();
+  return db.tx(async (tx): Promise<ApplyReferralResult> => {
+    await ensureUser(tx, userId, now);
+    const me = (await tx.get("SELECT created_at, referred_by FROM users WHERE user_id = ?", [userId])) as {
+      created_at: number;
+      referred_by: string | null;
+    };
+    if (me.referred_by) return { ok: false, code: "ALREADY_REFERRED", message: "You've already used a referral code." };
+    const days = cfg.referral.applyWithinDays;
+    if (days > 0 && now - me.created_at > days * 86_400_000) {
+      return { ok: false, code: "TOO_LATE", message: `Referral codes can only be used in the first ${days} days.` };
+    }
+    const referrer = (await tx.get("SELECT user_id, referred_by FROM users WHERE referral_code = ?", [code])) as
+      | { user_id: string; referred_by: string | null }
+      | undefined;
+    if (!referrer) return { ok: false, code: "INVALID_CODE", message: "That code isn't valid. Check it and try again." };
+    if (referrer.user_id === userId) return { ok: false, code: "SELF_REFERRAL", message: "You can't use your own code." };
+    if (referrer.referred_by === userId) {
+      return { ok: false, code: "CIRCULAR", message: "You can't use the code of someone you invited." };
+    }
+
+    const set = await tx.run(
+      "UPDATE users SET referred_by = ?, referral_status = 'pending', updated_at = ? WHERE user_id = ? AND referred_by IS NULL",
+      [referrer.user_id, now, userId]
+    );
+    if (set.changes !== 1) return { ok: false, code: "ALREADY_REFERRED", message: "You've already used a referral code." };
+    await tx.run(
+      "INSERT INTO referrals (referee_user_id, referrer_user_id, code, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+      [userId, referrer.user_id, code, now]
+    );
+    invalidateCounts("referrals");
+
+    const paid = await qualifyReferralInTx(tx, userId, now, cfg);
+    return { ok: true, status: paid ? "rewarded" : "pending", refereeCoins: paid?.refereeCoins ?? 0 };
+  });
+}
+
+export type ReferralSummary = {
+  code: string;
+  shareLink: string | null;
+  enabled: boolean;
+  referrerCoins: number;
+  refereeCoins: number;
+  /** People who used my code. */
+  invited: { total: number; pending: number; rewarded: number; rejected: number };
+  coinsEarned: number;
+  /** My own referral (if I used someone's code). */
+  myReferral: {
+    status: "none" | "pending" | "rewarded" | "rejected";
+    canApply: boolean;
+    applyUntil: number | null;
+    requirements: { googleLinked: boolean | null; reelsWatched: number; reelsNeeded: number };
+  };
+};
+
+export async function getReferralSummary(userId: string): Promise<ReferralSummary> {
+  await getOrCreateUser(userId);
+  const code = await ensureReferralCode(userId);
+  const cfg = await getRewardConfig();
+  const r = cfg.referral;
+  const db = await getDb();
+  const [counts, meRows, reelRows] = await db.batch(
+    [
+      { sql: "SELECT status, COUNT(*) AS n FROM referrals WHERE referrer_user_id = ? GROUP BY status", args: [userId] },
+      {
+        sql: "SELECT created_at, referred_by, referral_status, referral_coins, google_sub FROM users WHERE user_id = ?",
+        args: [userId],
+      },
+      {
+        sql: "SELECT COUNT(*) AS n FROM (SELECT 1 FROM user_reel_rewards WHERE user_id = ? LIMIT ?)",
+        args: [userId, Math.max(1, r.qualify.minReelsWatched)],
+      },
+    ],
+    "read"
+  );
+  const by = new Map((counts as { status: string; n: number }[]).map((c) => [c.status, Number(c.n)]));
+  const me = meRows[0] as {
+    created_at: number;
+    referred_by: string | null;
+    referral_status: string | null;
+    referral_coins: number | null;
+    google_sub: string | null;
+  };
+  const applyUntil = r.applyWithinDays > 0 ? me.created_at + r.applyWithinDays * 86_400_000 : null;
+  const status = (me.referral_status as ReferralSummary["myReferral"]["status"] | null) ?? "none";
+  return {
+    code,
+    shareLink: r.shareLinkTemplate ? r.shareLinkTemplate.replaceAll("{code}", code) : null,
+    enabled: r.enabled,
+    referrerCoins: r.referrerCoins,
+    refereeCoins: r.refereeCoins,
+    invited: {
+      total: [...by.values()].reduce((a, b) => a + b, 0),
+      pending: by.get("pending") ?? 0,
+      rewarded: by.get("rewarded") ?? 0,
+      rejected: by.get("rejected") ?? 0,
+    },
+    coinsEarned: me.referral_coins ?? 0,
+    myReferral: {
+      status,
+      canApply: r.enabled && !me.referred_by && (applyUntil === null || Date.now() <= applyUntil),
+      applyUntil,
+      requirements: {
+        googleLinked: r.qualify.requireGoogleLink ? Boolean(me.google_sub) : null,
+        reelsWatched: Number((reelRows[0] as { n: number }).n),
+        reelsNeeded: r.qualify.minReelsWatched,
+      },
+    },
+  };
+}
+
+// ---- Admin
+
+export type ReferralAdminItem = {
+  refereeUserId: string;
+  refereeEmail: string | null;
+  referrerUserId: string;
+  referrerEmail: string | null;
+  code: string;
+  status: "pending" | "rewarded" | "rejected";
+  createdAt: number;
+  rewardedAt: number | null;
+  referrerCoins: number;
+  refereeCoins: number;
+  note: string | null;
+};
+
+type ReferralAdminRow = {
+  referee_user_id: string;
+  referee_email: string | null;
+  referrer_user_id: string;
+  referrer_email: string | null;
+  code: string;
+  status: string;
+  created_at: number;
+  rewarded_at: number | null;
+  referrer_coins: number;
+  referee_coins: number;
+  note: string | null;
+};
+
+export async function listReferralsAdmin(options: {
+  status?: string;
+  userId?: string;
+  limit?: number;
+  cursor?: string | null;
+}): Promise<AdminPage<ReferralAdminItem>> {
+  const limit = Math.max(1, Math.min(options.limit ?? 30, 100));
+  const where: string[] = [];
+  const params: InValue[] = [];
+  if (options.status && ["pending", "rewarded", "rejected"].includes(options.status)) {
+    where.push("r.status = ?");
+    params.push(options.status);
+  }
+  if (options.userId?.trim()) {
+    where.push("(r.referrer_user_id = ? OR r.referee_user_id = ?)");
+    params.push(options.userId.trim(), options.userId.trim());
+  }
+  const { total, rows, nextCursor } = await keysetPage<ReferralAdminRow>({
+    table: "referrals",
+    select: `SELECT r.*, ee.google_email AS referee_email, er.google_email AS referrer_email
+             FROM referrals r
+             LEFT JOIN users ee ON ee.user_id = r.referee_user_id
+             LEFT JOIN users er ON er.user_id = r.referrer_user_id`,
+    from: "FROM referrals r",
+    where,
+    params,
+    orderCols: ["r.created_at", "r.referee_user_id"],
+    rowKey: (x) => [x.created_at, x.referee_user_id],
+    limit,
+    offset: 0,
+    cursor: options.cursor,
+  });
+  return {
+    total,
+    limit,
+    offset: 0,
+    nextCursor,
+    items: rows.map((x) => ({
+      refereeUserId: x.referee_user_id,
+      refereeEmail: x.referee_email,
+      referrerUserId: x.referrer_user_id,
+      referrerEmail: x.referrer_email,
+      code: x.code,
+      status: x.status as ReferralAdminItem["status"],
+      createdAt: x.created_at,
+      rewardedAt: x.rewarded_at,
+      referrerCoins: x.referrer_coins,
+      refereeCoins: x.referee_coins,
+      note: x.note,
+    })),
+  };
+}
+
+export async function getReferralStatsAdmin(): Promise<{
+  pending: number;
+  rewarded: number;
+  rejected: number;
+  coinsPaid: number;
+  topReferrers: { userId: string; email: string | null; count: number; coins: number }[];
+}> {
+  const db = await getDb();
+  const [byStatus, paid, top] = await db.batch(
+    [
+      { sql: "SELECT status, COUNT(*) AS n FROM referrals GROUP BY status", args: [] },
+      { sql: "SELECT COALESCE(SUM(referrer_coins + referee_coins), 0) AS coins FROM referrals WHERE status = 'rewarded'", args: [] },
+      {
+        sql: `SELECT user_id, google_email, referral_count, referral_coins FROM users
+              WHERE referral_count > 0 ORDER BY referral_count DESC LIMIT 10`,
+        args: [],
+      },
+    ],
+    "read"
+  );
+  const m = new Map((byStatus as { status: string; n: number }[]).map((x) => [x.status, Number(x.n)]));
+  return {
+    pending: m.get("pending") ?? 0,
+    rewarded: m.get("rewarded") ?? 0,
+    rejected: m.get("rejected") ?? 0,
+    coinsPaid: Number((paid[0] as { coins: number }).coins),
+    topReferrers: (top as { user_id: string; google_email: string | null; referral_count: number; referral_coins: number }[]).map((t) => ({
+      userId: t.user_id,
+      email: t.google_email,
+      count: t.referral_count,
+      coins: t.referral_coins,
+    })),
+  };
+}
+
+/** Admin: reject a pending referral (nothing is paid), or pay it now regardless of the rules. */
+export async function reviewReferralAdmin(
+  refereeId: string,
+  action: "reject" | "pay",
+  note?: string
+): Promise<{ ok: true } | { ok: false; reason: "not_pending" }> {
+  const db = await getDb();
+  const cfg = await getRewardConfig();
+  const now = Date.now();
+  return db.tx(async (tx) => {
+    if (action === "pay") {
+      const paid = await qualifyReferralInTx(tx, refereeId, now, cfg, { force: true });
+      if (!paid) return { ok: false as const, reason: "not_pending" as const };
+      if (note) await tx.run("UPDATE referrals SET note = ? WHERE referee_user_id = ?", [note, refereeId]);
+      return { ok: true as const };
+    }
+    const res = await tx.run(
+      "UPDATE referrals SET status = 'rejected', note = ? WHERE referee_user_id = ? AND status = 'pending'",
+      [note || null, refereeId]
+    );
+    if (res.changes !== 1) return { ok: false as const, reason: "not_pending" as const };
+    await tx.run("UPDATE users SET referral_status = 'rejected' WHERE user_id = ?", [refereeId]);
+    invalidateCounts("referrals");
+    return { ok: true as const };
+  });
 }

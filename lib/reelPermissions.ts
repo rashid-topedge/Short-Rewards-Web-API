@@ -1,16 +1,17 @@
 import type { StaffSession } from "@/lib/auth";
 import type { AdminReelItem, ReelChanges, ReelPermissions } from "@/lib/types";
 
+// Approval for moderator reels is currently off; see lib/moderation.ts.
+export { MODERATOR_APPROVAL_REQUIRED } from "@/lib/moderation";
+
 /**
  * What the signed-in staff member may do with a reel. The API enforces these
  * same rules; the UI only uses them to show the right buttons.
  *
  * Moderators act only on reels they uploaded:
  * - edit title/description/tags/drama/episode and replace video or thumbnail
- *   (on a live reel the edits wait for approval)
+ * - publish / unpublish it
  * - delete it only if it was never published
- * - unpublish (hide) it when live
- * - submit a draft or rejected reel for approval
  */
 export function reelPermissions(session: StaffSession, reel: AdminReelItem): ReelPermissions {
   if (session.role === "admin") {
@@ -24,12 +25,22 @@ export function reelPermissions(session: StaffSession, reel: AdminReelItem): Ree
     };
   }
   const own = reel.createdById === session.actorId;
+  // APPROVAL FLOW (disabled): with approvals on, moderators couldn't publish
+  // and instead submitted drafts for review:
+  // return {
+  //   canEdit: own,
+  //   canDelete: own && !reel.isPublished && !reel.firstPublishedAt,
+  //   canTogglePublish: false,
+  //   canUnpublish: own && reel.isPublished,
+  //   canSubmit: own && !reel.isPublished && (reel.reviewStatus === "draft" || reel.reviewStatus === "rejected"),
+  //   canReview: false,
+  // };
   return {
     canEdit: own,
     canDelete: own && !reel.isPublished && !reel.firstPublishedAt,
-    canTogglePublish: false,
+    canTogglePublish: own,
     canUnpublish: own && reel.isPublished,
-    canSubmit: own && !reel.isPublished && (reel.reviewStatus === "draft" || reel.reviewStatus === "rejected"),
+    canSubmit: false,
     canReview: false,
   };
 }

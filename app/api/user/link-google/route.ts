@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getOrCreateUser, linkGoogleAccount } from "@/lib/db";
+import { checkReferralQualification, getOrCreateUser, linkGoogleAccount } from "@/lib/db";
 import { GoogleTokenError, isGoogleSignInConfigured, verifyGoogleIdToken } from "@/lib/googleAuth";
 import { authError, requireUser } from "@/lib/userAuth";
 
@@ -51,6 +51,8 @@ export async function POST(req: NextRequest) {
       return authError(409, "ACCOUNT_ALREADY_LINKED", "This account is already linked to a different Google account.");
     }
 
+    // Linking Google may complete a pending referral (pays both sides).
+    await checkReferralQualification(auth.userId).catch((err) => console.error("Referral check failed:", err));
     const user = await getOrCreateUser(auth.userId);
     return NextResponse.json({ ...user, linked: true });
   } catch (err: unknown) {

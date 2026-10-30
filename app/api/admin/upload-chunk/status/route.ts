@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireStaff } from "@/lib/auth";
 import { canUploadTo } from "@/lib/reelPermissions";
 import { getUploadSession, listUploadedChunks } from "@/lib/db";
+import { ensureDirectUploads } from "@/lib/b2Direct";
+import type { FolderType } from "@/lib/b2";
 
 export async function GET(req: NextRequest) {
   const auth = await requireStaff(req);
@@ -21,8 +23,11 @@ export async function GET(req: NextRequest) {
     if (!canUploadTo(staff, session.folderType)) {
       return NextResponse.json({ error: "Moderators can only upload reels." }, { status: 403 });
     }
+    const direct = await ensureDirectUploads(session.folderType as FolderType);
     return NextResponse.json({
       success: true,
+      uploadMode: direct.ok ? "direct" : "server",
+      directProblem: direct.ok ? null : direct.reason,
       sessionId: session.sessionId,
       fileName: session.fileName,
       fileSize: session.fileSize,

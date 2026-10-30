@@ -18,6 +18,10 @@ interface CachedClient {
   authorizedAt: number;
   downloadUrl?: string;
   apiUrl?: string;
+  authorizationToken?: string;
+  accountId?: string;
+  s3ApiUrl?: string;
+  capabilities?: string[];
 }
 
 // In-memory cache for authorized B2 clients (auth tokens last 24h)
@@ -102,9 +106,30 @@ export async function getB2Client(keyId: string, applicationKey: string): Promis
     authorizedAt: now,
     downloadUrl,
     apiUrl,
+    authorizationToken: authRes.data.authorizationToken,
+    accountId: authRes.data.accountId,
+    s3ApiUrl: authRes.data.s3ApiUrl,
+    capabilities: authRes.data.allowed?.capabilities,
   });
 
   return { client, downloadUrl };
+}
+
+/** Raw account details from the (cached) authorization, for native API calls the library doesn't wrap. */
+export async function getB2AuthInfo(
+  keyId: string,
+  applicationKey: string
+): Promise<{ client: B2; apiUrl: string; authorizationToken: string; accountId: string; s3ApiUrl: string | null; capabilities: string[] }> {
+  const { client } = await getB2Client(keyId, applicationKey);
+  const c = clientCache.get(`${keyId}:${applicationKey}`);
+  return {
+    client,
+    apiUrl: c?.apiUrl || "",
+    authorizationToken: c?.authorizationToken || "",
+    accountId: c?.accountId || "",
+    s3ApiUrl: c?.s3ApiUrl || null,
+    capabilities: c?.capabilities || [],
+  };
 }
 
 /**

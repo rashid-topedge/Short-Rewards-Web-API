@@ -5,17 +5,20 @@ The console has two roles.
 | | Admin | Moderator |
 |---|---|---|
 | Sign-in | Admin account stored in the database; changed on **My Account** | Account created on **Team** |
-| Pages | Everything | **Reels** only (other pages redirect to Reels) |
-| Upload reels | Publish now or save as draft | Save as draft, or **submit for approval** |
+| Pages | Everything | **Reels** and **Rewards** (other pages redirect to Reels) |
+| Upload reels | Publish now or save as draft | Publish now or save as draft (no approval needed) |
 | Edit reels | Any reel | Only reels they uploaded |
-| Edit a live reel | Applies immediately | Saved as **pending changes**; the live version stays until approved |
-| Replace video / thumbnail | Yes | Yes (own reels; on a live reel it's part of the pending changes) |
-| Unpublish | Any reel | Own live reels (going live again needs approval) |
+| Edit a live reel | Applies immediately | Applies immediately (own reels) |
+| Replace video / thumbnail | Yes | Yes (own reels) |
+| Publish / unpublish | Any reel | Own reels |
 | Delete | Any reel | Own reels that were **never published** |
-| Approve / reject | Yes (**Waiting for approval** tab) | No |
-| Dramas, users, payouts, transactions, settings, team, activity | Yes | No (APIs return 401) |
+| Coin rewards (Rewards page) | Yes | Yes (every change is in the Activity log under their name) |
+| Approve / reject | Yes (**Waiting for approval** tab) | No (approval is currently off) |
+| Dramas, users, payouts, transactions, referrals, settings, team, activity | Yes | No (APIs return 401) |
 
-## Review flow
+## Review flow (currently off)
+
+Moderators currently publish without approval. The approval flow below is kept in the code for later: set `MODERATOR_APPROVAL_REQUIRED = true` in `lib/moderation.ts` and restore the lines marked `APPROVAL FLOW` in `lib/reelPermissions.ts` and `app/api/admin/reels/route.ts`. Reels already waiting for approval can still be reviewed by the admin.
 
 1. A moderator uploads a reel and submits it → status **Waiting for approval**.
 2. The admin opens **Reels → Waiting for approval** and clicks **Review** on the card.

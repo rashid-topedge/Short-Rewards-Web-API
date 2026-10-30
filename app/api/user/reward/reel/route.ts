@@ -4,9 +4,12 @@ import { claimResponse, readClaimId } from "@/lib/claimHttp";
 import { requireUser } from "@/lib/userAuth";
 
 /**
- * POST /api/user/reward/reel[?lite=1]   { reelId, claimId? }
- * Each reel pays once per user, from any device.
- * 200 granted (or `replayed: true`), 409 ALREADY_CLAIMED, 429 DAILY_LIMIT.
+ * POST /api/user/reward/reel[?lite=1]   { reelId, watchToken?, claimId? }
+ * Each reel pays once per user, from any device; the amount depends on the
+ * reel's length (admin → Rewards). `watchToken` comes from
+ * POST /api/user/reward/reel/start when the reel starts playing.
+ * 200 granted (or `replayed: true`), 409 ALREADY_CLAIMED, 429 DAILY_LIMIT,
+ * 425 TOO_EARLY (Retry-After), 400 INVALID_WATCH_TOKEN / WATCH_TOKEN_REQUIRED, 404 REEL_NOT_FOUND.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -24,7 +27,8 @@ export async function POST(req: NextRequest) {
     }
 
     const includeTransactions = new URL(req.url).searchParams.get("lite") !== "1";
-    const result = await awardReelWatched(auth.userId, reelId, { includeTransactions, claimId });
+    const watchToken = typeof body?.watchToken === "string" ? body.watchToken : undefined;
+    const result = await awardReelWatched(auth.userId, reelId, { includeTransactions, claimId, watchToken });
     return claimResponse(result);
   } catch (err: unknown) {
     console.error("Failed to process reel reward:", err);

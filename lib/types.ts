@@ -137,7 +137,16 @@ export type ReelListResponse = {
 export type CoinTransaction = {
   id: number;
   userId: string;
-  type: "DAILY_CHECKIN" | "EPISODE_WATCHED" | "REWARD_AD" | "REEL_WATCHED" | "SIGNUP_BONUS" | "SPEND" | "ADMIN_ADJUSTMENT";
+  type:
+    | "DAILY_CHECKIN"
+    | "EPISODE_WATCHED"
+    | "REWARD_AD"
+    | "REEL_WATCHED"
+    | "SIGNUP_BONUS"
+    | "SPEND"
+    | "ADMIN_ADJUSTMENT"
+    | "REFERRAL_REFERRER"
+    | "REFERRAL_REFEREE";
   amount: number;
   description: string;
   createdAt: number;
@@ -165,11 +174,24 @@ export type UserProfile = {
 
 /** Set on claim responses that didn't grant coins (or replayed an earlier claim). */
 type ClaimMeta = {
-  /** ALREADY_CLAIMED (409), DAILY_LIMIT / COOLDOWN (429), CLAIM_ID_REUSED (422). */
-  code?: "ALREADY_CLAIMED" | "DAILY_LIMIT" | "COOLDOWN" | "CLAIM_ID_REUSED";
+  /**
+   * ALREADY_CLAIMED (409), DAILY_LIMIT / COOLDOWN (429), CLAIM_ID_REUSED (422),
+   * reels only: REEL_NOT_FOUND (404), TOO_EARLY (425), INVALID_WATCH_TOKEN / WATCH_TOKEN_REQUIRED (400).
+   */
+  code?:
+    | "ALREADY_CLAIMED"
+    | "DAILY_LIMIT"
+    | "COOLDOWN"
+    | "CLAIM_ID_REUSED"
+    | "REEL_NOT_FOUND"
+    | "TOO_EARLY"
+    | "INVALID_WATCH_TOKEN"
+    | "WATCH_TOKEN_REQUIRED";
   alreadyClaimed?: boolean;
   /** True when this is the stored answer to a claim ID that was already processed. */
   replayed?: boolean;
+  /** Coins paid to this user because their referral qualified with this claim. */
+  referralBonus?: number;
 };
 
 export type CheckInResult = ClaimMeta & {
@@ -190,6 +212,9 @@ export type RewardResult = ClaimMeta & {
   /** Set when the reward was refused because of a daily cap or cooldown. */
   limitReason?: "LIMIT" | "COOLDOWN";
   retryAfterSeconds?: number;
+  /** Reels: the reel's length, and whether it paid by length or the no-watch-token amount. */
+  reelSeconds?: number;
+  paidBy?: string;
   user: UserProfile;
 };
 

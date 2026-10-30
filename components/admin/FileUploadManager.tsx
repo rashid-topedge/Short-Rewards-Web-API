@@ -19,6 +19,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import Link from "next/link";
+import { ChunkSender, UploadAbortedError } from "@/lib/chunkUpload";
 
 export type FolderType = "dramas" | "reels" | "payouts";
 
@@ -40,7 +41,8 @@ export interface UploadItem {
   error?: string;
   url?: string;
   storage?: "b2" | "local";
-  activeXhr?: XMLHttpRequest;
+  /** Aborts the chunk in flight (pause/remove). */
+  activeXhr?: { abort(): void };
   startTime?: number;
   lastProgressTime?: number;
   lastBytesUploaded?: number;
@@ -77,6 +79,8 @@ export default function FileUploadManager({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const itemsRef = useRef<UploadItem[]>([]);
+  // One sender per item: remembers whether this session uploads directly to Backblaze.
+  const sendersRef = useRef(new Map<string, ChunkSender>());
 
   useEffect(() => {
     itemsRef.current = items;
@@ -147,71 +151,55 @@ export default function FileUploadManager({
     return <FileGeneric className="w-5 h-5 text-neutral-400 shrink-0" />;
   };
 
-  // Upload a single chunk via XMLHttpRequest with real-time progress & abort handle
-  const uploadChunk = (
+  // Upload a single chunk (straight to Backblaze when possible) with progress & abort handle
+  const uploadChunk = async (
     item: UploadItem,
     chunkIndex: number,
     chunkBlob: Blob
   ): Promise<{ success: boolean; chunkIndex: number }> => {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      updateItem(item.id, { activeXhr: xhr });
+    const sender = sendersRef.current.get(item.id);
+    if (!sender) throw new Error("Upload session isn't ready. Please retry.");
+    const controller = new AbortController();
+    updateItem(item.id, { activeXhr: controller });
+    try {
+      await sender.send(chunkIndex, chunkBlob, (loaded) => {
+      const currentItem = itemsRef.current.find((it) => it.id === item.id);
+      if (!currentItem || currentItem.status === "paused") return;
 
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const currentItem = itemsRef.current.find((it) => it.id === item.id);
-          if (!currentItem || currentItem.status === "paused") return;
+      const baseBytes = chunkIndex * item.chunkSize;
+      const totalUploadedBytes = Math.min(item.fileSize, baseBytes + loaded);
+      const percent = Math.min(99, Math.round((totalUploadedBytes / item.fileSize) * 100));
 
-          const baseBytes = chunkIndex * item.chunkSize;
-          const totalUploadedBytes = Math.min(item.fileSize, baseBytes + e.loaded);
-          const percent = Math.min(99, Math.round((totalUploadedBytes / item.fileSize) * 100));
+      // Calculate speed
+      const now = Date.now();
+      const lastTime = currentItem.lastProgressTime || now;
+      const lastBytes = currentItem.lastBytesUploaded || 0;
+      const timeDiff = (now - lastTime) / 1000;
+      let speedStr = currentItem.speed || "0 KB/s";
 
-          // Calculate speed
-          const now = Date.now();
-          const lastTime = currentItem.lastProgressTime || now;
-          const lastBytes = currentItem.lastBytesUploaded || 0;
-          const timeDiff = (now - lastTime) / 1000;
-          let speedStr = currentItem.speed || "0 KB/s";
-
-          if (timeDiff >= 0.5) {
-            const bytesDiff = totalUploadedBytes - lastBytes;
-            const bytesPerSec = bytesDiff / timeDiff;
-            speedStr = `${formatBytes(bytesPerSec)}/s`;
-            updateItem(item.id, {
-              progress: percent,
-              bytesUploaded: totalUploadedBytes,
-              speed: speedStr,
-              lastProgressTime: now,
-              lastBytesUploaded: totalUploadedBytes,
-            });
-          } else {
-            updateItem(item.id, {
-              progress: percent,
-              bytesUploaded: totalUploadedBytes,
-            });
-          }
-        }
-      };
-
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve({ success: true, chunkIndex });
-        } else {
-          reject(new Error(`Chunk upload failed with HTTP ${xhr.status}`));
-        }
-      };
-
-      xhr.onerror = () => reject(new Error("Network connection error during chunk upload"));
-      xhr.onabort = () => reject(new Error("Upload paused by user"));
-
-      const formData = new FormData();
-      formData.append("sessionId", item.sessionId!);
-      formData.append("chunkIndex", String(chunkIndex));
-      formData.append("chunk", chunkBlob, `chunk_${chunkIndex}.part`);
-
-      xhr.open("POST", "/api/admin/upload-chunk/part", true);
-      xhr.send(formData);
-    });
+      if (timeDiff >= 0.5) {
+        const bytesDiff = totalUploadedBytes - lastBytes;
+        const bytesPerSec = bytesDiff / timeDiff;
+        speedStr = `${formatBytes(bytesPerSec)}/s`;
+        updateItem(item.id, {
+          progress: percent,
+          bytesUploaded: totalUploadedBytes,
+          speed: speedStr,
+          lastProgressTime: now,
+          lastBytesUploaded: totalUploadedBytes,
+        });
+      } else {
+        updateItem(item.id, {
+          progress: percent,
+          bytesUploaded: totalUploadedBytes,
+        });
+      }
+      }, controller.signal);
+      return { success: true, chunkIndex };
+    } catch (err) {
+      if (err instanceof UploadAbortedError) throw new Error("Upload paused by user");
+      throw err;
+    }
   };
 
   // Complete assembly and get final B2 / local URL
@@ -291,6 +279,10 @@ export default function FileUploadManager({
         }
 
         const initData = await initRes.json();
+        sendersRef.current.set(
+          item.id,
+          ChunkSender.fromServer(initData.sessionId, item.file.type || "application/octet-stream", initData)
+        );
         item = {
           ...item,
           sessionId: initData.sessionId,
@@ -306,6 +298,12 @@ export default function FileUploadManager({
           const statusRes = await fetch(`/api/admin/upload-chunk/status?sessionId=${item.sessionId}`);
           if (statusRes.ok) {
             const statusData = await statusRes.json();
+            if (!sendersRef.current.has(item.id)) {
+              sendersRef.current.set(
+                item.id,
+                ChunkSender.fromServer(item.sessionId!, item.file.type || "application/octet-stream", statusData)
+              );
+            }
             item = {
               ...item,
               uploadedChunks: statusData.uploadedChunks || item.uploadedChunks,
@@ -314,6 +312,12 @@ export default function FileUploadManager({
           }
         } catch {
           // continue with local record
+        }
+        if (!sendersRef.current.has(item.id)) {
+          sendersRef.current.set(
+            item.id,
+            ChunkSender.fromServer(item.sessionId!, item.file.type || "application/octet-stream", {})
+          );
         }
       }
 

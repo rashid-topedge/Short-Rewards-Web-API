@@ -9,7 +9,7 @@ import {
   moderatorEditReel,
   updateReelAdmin,
 } from "@/lib/db";
-import { actorOf, reelChangesFromBody, reelPermissions } from "@/lib/reelPermissions";
+import { actorOf, MODERATOR_APPROVAL_REQUIRED, reelChangesFromBody, reelPermissions } from "@/lib/reelPermissions";
 
 type Ctx = { params: Promise<{ reelId: string }> };
 
@@ -30,10 +30,12 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 /**
  * PUT /api/admin/reels/:id
  * Admin: edits anything, including publishing.
- * Moderator (own reels only): edits title/description/tags/drama/episode and
- * may replace the video or thumbnail. On a live reel the edits are saved as
- * pending changes for approval. `submitForReview: true` sends a draft for
- * approval; `isPublished: false` hides their live reel (it becomes a draft).
+ * Moderator (own reels only): edits title/description/tags/drama/episode,
+ * may replace the video or thumbnail, and publish/unpublish. Changes apply
+ * immediately (approval is off). Never view/like counts.
+ * APPROVAL FLOW (disabled): on a live reel the edits were saved as pending
+ * changes for approval; `submitForReview: true` sent a draft for approval;
+ * `isPublished: false` hid their live reel (it became a draft).
  */
 export async function PUT(req: NextRequest, ctx: Ctx) {
   const auth = await requireStaff(req);
@@ -47,6 +49,44 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
     const before = await getReelAdmin(id);
     if (!before) return NextResponse.json({ error: "Reel not found" }, { status: 404 });
 
+    if (session.role === "moderator" && !MODERATOR_APPROVAL_REQUIRED) {
+      if (before.createdById !== session.actorId) {
+        return NextResponse.json({ error: "You can only change reels you uploaded.", code: "NOT_OWNER" }, { status: 403 });
+      }
+      const changes = reelChangesFromBody(body);
+      if (changes.title !== undefined && !changes.title.trim()) {
+        return NextResponse.json({ error: "Title is required" }, { status: 400 });
+      }
+      const publish = typeof body.isPublished === "boolean" ? body.isPublished : undefined;
+      const reel = await updateReelAdmin(
+        id,
+        {
+          ...changes,
+          synopsis: changes.synopsis === null ? "" : changes.synopsis,
+          thumbnailUrl: changes.thumbnailUrl === null ? "" : changes.thumbnailUrl,
+          isPublished: publish,
+        },
+        { name: session.displayName }
+      );
+      if (!reel) return NextResponse.json({ error: "Reel not found" }, { status: 404 });
+
+      const toggled = publish !== undefined && publish !== before.isPublished;
+      const onlyToggle = toggled && Object.keys(changes).length === 0;
+      await logActivity(actorOf(session), {
+        action: onlyToggle ? (publish ? "reel.published" : "reel.unpublished") : "reel.edited",
+        entityType: "reel",
+        entityId: id,
+        summary: onlyToggle
+          ? `${publish ? "Published" : "Unpublished"} "${reel.title}"`
+          : `Edited "${reel.title}"${toggled ? (publish ? " and published it" : " and unpublished it") : ""}`,
+        details: Object.keys(changes).length ? { fields: Object.keys(changes) } : null,
+      });
+      cleanUpStorageLater(); // in case the video or thumbnail was replaced
+      const full = await getReelAdmin(id);
+      return NextResponse.json(full ? { ...full, permissions: reelPermissions(session, full), mode: "applied" } : reel);
+    }
+
+    // APPROVAL FLOW (disabled while MODERATOR_APPROVAL_REQUIRED is false): kept for later.
     if (session.role === "moderator") {
       const changes = reelChangesFromBody(body);
       if (changes.title !== undefined && !changes.title.trim()) {
