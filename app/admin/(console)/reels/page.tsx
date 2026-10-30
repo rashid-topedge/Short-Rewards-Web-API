@@ -136,12 +136,86 @@ export default function AdminReelsPage() {
     fetchReels();
   }, [fetchReels]);
 
+  // Page changes keep an "all reels" selection (so you can untick reels on any
+  // page); a page-only selection and any filter change start over.
   useEffect(() => setSelectedIds([]), [debouncedQuery, statusFilter, mineOnly, cursor]);
+  useEffect(() => {
+    setAllMatching(false);
+    setExcludedIds([]);
+  }, [debouncedQuery, statusFilter, mineOnly]);
 
   const allSelected = reels.length > 0 && selectedIds.length === reels.length;
-  const toggleSelectAll = () => setSelectedIds(allSelected ? [] : reels.map((r) => r.reelId));
-  const toggleSelect = (id: number) =>
+  // "Select all N reels": every reel matching the current search/filter, on
+  // every page. Unticking a reel then keeps it (excludedIds), e.g. "delete all but one".
+  const [allMatching, setAllMatching] = useState(false);
+  const [excludedIds, setExcludedIds] = useState<number[]>([]);
+  const isChecked = (id: number) => (allMatching ? !excludedIds.includes(id) : selectedIds.includes(id));
+  const selectedCount = allMatching ? Math.max(0, total - excludedIds.length) : selectedIds.length;
+  const selectAllMatching = () => {
+    setAllMatching(true);
+    setExcludedIds([]);
+    setSelectedIds([]);
+  };
+  const pageAllChecked = reels.length > 0 && reels.every((r) => isChecked(r.reelId));
+  const toggleSelectAll = () => {
+    if (allMatching) {
+      // Keep (untick) or re-include every reel on this page.
+      const ids = reels.map((r) => r.reelId);
+      setExcludedIds((prev) => (pageAllChecked ? [...new Set([...prev, ...ids])] : prev.filter((id) => !ids.includes(id))));
+      return;
+    }
+    setSelectedIds(allSelected ? [] : reels.map((r) => r.reelId));
+  };
+  const toggleSelect = (id: number) => {
+    if (allMatching) {
+      setExcludedIds((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]));
+      return;
+    }
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]));
+  };
+  const clearSelection = () => {
+    setAllMatching(false);
+    setExcludedIds([]);
+    setSelectedIds([]);
+  };
+
+  const handleBulkDelete = async () => {
+    const count = selectedCount;
+    if (count === 0) return;
+    if (allMatching) {
+      const typed = window.prompt(
+        `Delete ${count.toLocaleString()} reels${debouncedQuery ? ` matching "${debouncedQuery}"` : ""}${
+          statusFilter !== "all" ? ` in "${statusFilter}"` : ""
+        }${excludedIds.length ? `, keeping the ${excludedIds.length} you unticked` : ""}? Their videos are removed from storage and this can't be undone.\n\nType DELETE to confirm.`
+      );
+      if (typed?.trim().toUpperCase() !== "DELETE") return;
+    } else if (!window.confirm(`Delete ${count} selected reel${count === 1 ? "" : "s"}? This can't be undone.`)) {
+      return;
+    }
+    setBulkLoading(true);
+    try {
+      const res = await fetch("/api/admin/reels/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          allMatching
+            ? { action: "delete", all: true, filter: { q: debouncedQuery, status: statusFilter, mine: mineOnly }, excludeIds: excludedIds }
+            : { action: "delete", reelIds: selectedIds }
+        ),
+      });
+      const data = (await res.json().catch(() => ({}))) as { count?: number; error?: string };
+      if (res.ok) {
+        setNotice(`${(data.count ?? count).toLocaleString()} reel(s) deleted.`);
+        clearSelection();
+        resetPager();
+        refresh();
+      } else {
+        setNotice(data.error || "Couldn't delete the reels. Please try again.");
+      }
+    } finally {
+      setBulkLoading(false);
+    }
+  };
 
   const handleBulkPublish = async (publish: boolean) => {
     if (selectedIds.length === 0) return;
@@ -339,12 +413,33 @@ export default function AdminReelsPage() {
       </div>
 
       {/* Bulk bar */}
-      {isAdmin && selectedIds.length > 0 && (
+      {isAdmin && (allMatching || selectedIds.length > 0) && (
         <div className="flex flex-col gap-3 rounded-xl border border-purple-500/40 bg-purple-950/40 p-3.5 text-sm sm:flex-row sm:items-center sm:justify-between">
           <p className="text-purple-100">
-            <span className="font-bold text-white">{selectedIds.length}</span> selected
+            {allMatching ? (
+              <>
+                <span className="font-bold text-white">{selectedCount.toLocaleString()}</span> of {total.toLocaleString()} reels selected
+                {excludedIds.length > 0 ? ` (keeping ${excludedIds.length})` : ""}
+                <span className="block text-xs text-purple-200/80">Untick any reel, on any page, to keep it.</span>
+              </>
+            ) : (
+              <>
+                <span className="font-bold text-white">{selectedIds.length}</span> selected
+                {allSelected && total > reels.length && (
+                  <button
+                    type="button"
+                    onClick={() => setAllMatching(true)}
+                    className="ml-2 rounded font-semibold text-purple-200 underline underline-offset-2 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400"
+                  >
+                    Select all {total.toLocaleString()} reels
+                  </button>
+                )}
+              </>
+            )}
           </p>
           <div className="flex flex-wrap gap-2">
+            {!allMatching && (
+              <>
             <button
               type="button"
               onClick={() => handleBulkPublish(true)}
@@ -361,9 +456,20 @@ export default function AdminReelsPage() {
             >
               <EyeOff className="h-4 w-4" aria-hidden="true" /> Move to drafts
             </button>
+              </>
+            )}
             <button
               type="button"
-              onClick={() => setSelectedIds([])}
+              onClick={handleBulkDelete}
+              disabled={bulkLoading}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-rose-600 px-3 font-semibold text-white hover:bg-rose-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:opacity-50"
+            >
+              {bulkLoading ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Trash2 className="h-4 w-4" aria-hidden="true" />}
+              {allMatching ? `Delete ${selectedCount.toLocaleString()}` : "Delete"}
+            </button>
+            <button
+              type="button"
+              onClick={clearSelection}
               className="h-9 rounded-lg bg-[#232d41] px-3 font-semibold text-neutral-100 hover:bg-[#2e3b52] focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400"
             >
               Clear selection
@@ -378,13 +484,24 @@ export default function AdminReelsPage() {
           <label className="flex cursor-pointer items-center gap-2 font-medium">
             <input
               type="checkbox"
-              checked={allSelected}
+              checked={pageAllChecked}
               onChange={toggleSelectAll}
               disabled={reels.length === 0}
               className="h-4 w-4 accent-purple-500"
             />
             Select all on this page
           </label>
+        ) : (
+          <span />
+        )}
+        {isAdmin && total > 0 && !allMatching ? (
+          <button
+            type="button"
+            onClick={selectAllMatching}
+            className="rounded font-semibold text-purple-300 underline underline-offset-2 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400"
+          >
+            Select all {total.toLocaleString()} reels{statusFilter !== "all" || debouncedQuery || mineOnly ? " in this view" : ""}
+          </button>
         ) : (
           <span />
         )}
@@ -437,7 +554,7 @@ export default function AdminReelsPage() {
               key={reel.reelId}
               reel={reel}
               selectable={isAdmin}
-              selected={selectedIds.includes(reel.reelId)}
+              selected={isChecked(reel.reelId)}
               onSelect={() => toggleSelect(reel.reelId)}
               onPlay={() => setPreview(reel)}
               onEdit={() => setEditing(reel)}

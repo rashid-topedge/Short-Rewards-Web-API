@@ -2704,19 +2704,15 @@ export async function deleteEpisodeAdmin(dramaId: number, ep: number): Promise<E
 // REELS ADMIN CRUD
 // ==========================================
 
-export async function listReelsAdmin(options: {
+export type ReelAdminFilter = {
   query?: string;
-  /** "pending" = waiting for approval (new reels or pending changes). */
   status?: "all" | "published" | "draft" | "pending";
   dramaId?: number;
-  /** Only reels created by this staff member (e.g. "mod:3"). */
   createdById?: string;
-  limit?: number;
-  offset?: number;
-  cursor?: string | null;
-}): Promise<AdminPage<AdminReelItem>> {
-  const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
-  const offset = Math.max(0, options.offset ?? 0);
+};
+
+/** WHERE clauses for the admin reels list (aliases: r = reels, d = dramas). */
+function reelAdminFilter(options: ReelAdminFilter): { where: string[]; params: InValue[] } {
   const query = options.query?.trim();
   const status = options.status || "all";
   const where: string[] = [];
@@ -2736,6 +2732,23 @@ export async function listReelsAdmin(options: {
     where.push("r.created_by_id = ?");
     params.push(options.createdById);
   }
+  return { where, params };
+}
+
+export async function listReelsAdmin(options: {
+  query?: string;
+  /** "pending" = waiting for approval (new reels or pending changes). */
+  status?: "all" | "published" | "draft" | "pending";
+  dramaId?: number;
+  /** Only reels created by this staff member (e.g. "mod:3"). */
+  createdById?: string;
+  limit?: number;
+  offset?: number;
+  cursor?: string | null;
+}): Promise<AdminPage<AdminReelItem>> {
+  const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+  const offset = Math.max(0, options.offset ?? 0);
+  const { where, params } = reelAdminFilter(options);
 
   const { total, rows, nextCursor } = await keysetPage<ReelRow>({
     table: "reels",
@@ -2938,6 +2951,59 @@ export async function deleteReelAdmin(reelId: number): Promise<boolean> {
   return true;
 }
 
+
+/**
+ * Admin: deletes many reels at once. Pass ids, or a filter (the admin list's
+ * search/status) to delete every reel matching it. Works in batches of 200,
+ * each batch one write transaction; files go to the Backblaze delete queue.
+ * Returns how many reels were deleted.
+ */
+export async function bulkDeleteReelsAdmin(
+  target: { reelIds: number[] } | { filter: ReelAdminFilter; excludeIds?: number[] }
+): Promise<number> {
+  const BATCH = 200;
+  const db = await getDb();
+  let deleted = 0;
+
+  const deleteIds = async (ids: number[]) => {
+    if (!ids.length) return 0;
+    const ph = ids.map(() => "?").join(",");
+    return db.tx(async (tx) => {
+      const rows = (await tx.all(`SELECT video_url, thumbnail_url FROM reels WHERE reel_id IN (${ph})`, ids)) as {
+        video_url: string | null;
+        thumbnail_url: string | null;
+      }[];
+      const res = await tx.run(`DELETE FROM reels WHERE reel_id IN (${ph})`, ids);
+      await enqueueFileDeletes(tx, "reels", rows.flatMap((r) => [r.video_url, r.thumbnail_url]));
+      return res.changes;
+    });
+  };
+
+  if ("reelIds" in target) {
+    const ids = [...new Set(target.reelIds.filter((n) => Number.isInteger(n) && n > 0))];
+    for (let i = 0; i < ids.length; i += BATCH) deleted += await deleteIds(ids.slice(i, i + BATCH));
+  } else {
+    const { where, params } = reelAdminFilter(target.filter);
+    // Reels the admin chose to keep.
+    const keep = [...new Set((target.excludeIds ?? []).filter((n) => Number.isInteger(n) && n > 0))];
+    if (keep.length) {
+      where.push(`r.reel_id NOT IN (${keep.map(() => "?").join(",")})`);
+      params.push(...keep);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    // Keep taking the first batch of matches until none are left.
+    for (let guard = 0; guard < 10_000; guard++) {
+      const rows = (await db.all(
+        `SELECT r.reel_id FROM reels r LEFT JOIN dramas d ON r.drama_id = d.drama_id ${whereSql} ORDER BY r.reel_id LIMIT ?`,
+        [...params, BATCH]
+      )) as { reel_id: number }[];
+      if (!rows.length) break;
+      deleted += await deleteIds(rows.map((r) => r.reel_id));
+    }
+  }
+  invalidateCounts("reels");
+  return deleted;
+}
 
 export async function bulkUpdateReelsPublish(
   reelIds: number[],
