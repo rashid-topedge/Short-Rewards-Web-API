@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
-import { processRedemptionAdmin } from "@/lib/db";
+import { getStaffSession, isAdminOrLead } from "@/lib/auth";
+import { logActivity, processRedemptionAdmin } from "@/lib/db";
+import { actorOf } from "@/lib/reelPermissions";
 
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!(await isAuthenticatedAdmin(req))) {
+  // Admin and lead moderators confirm or reject payouts; every decision is in the Activity log.
+  const session = await getStaffSession(req);
+  if (!isAdminOrLead(session)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -23,6 +26,14 @@ export async function POST(
       return NextResponse.json({ error: "Action must be PAID or REJECTED" }, { status: 400 });
     }
 
+    // The app opens the receipt as an image link, so it has to be a web address.
+    if (action === "PAID" && typeof body?.receiptUrl === "string" && body.receiptUrl.trim() && !/^https?:\/\/\S+$/i.test(body.receiptUrl.trim())) {
+      return NextResponse.json(
+        { success: false, message: "The receipt must be an uploaded image or an https:// link." },
+        { status: 400 }
+      );
+    }
+
     const result = await processRedemptionAdmin(redemptionId, {
       action,
       transactionRef: body?.transactionRef,
@@ -33,6 +44,17 @@ export async function POST(
     if (!result.success) {
       return NextResponse.json(result, { status: 400 });
     }
+
+    const r = result.redemption;
+    await logActivity(actorOf(session), {
+      action: action === "PAID" ? "payout.paid" : "payout.rejected",
+      entityType: "payout",
+      entityId: redemptionId,
+      summary:
+        action === "PAID"
+          ? `Paid payout #${redemptionId}${r ? ` (Rs. ${r.pkrAmount} via ${r.paymentMethod})` : ""}, ref ${String(body?.transactionRef ?? "").trim()}`
+          : `Rejected payout #${redemptionId}${body?.adminNotes ? `: ${String(body.adminNotes).trim()}` : ""} (coins refunded)`,
+    }).catch((err) => console.error("Activity log failed:", err));
 
     return NextResponse.json(result);
   } catch (err: unknown) {

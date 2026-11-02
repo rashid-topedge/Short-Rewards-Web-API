@@ -241,3 +241,19 @@ GET /api/dramas/{dramaId}/episodes            → { dramaId, episodes: [ { ep, t
   `durationSeconds` (may be null).
 - Drama IDs of new dramas never reuse old ones, so episode rewards
   (`POST /api/user/reward/episode {dramaId, ep}`) keep working as before.
+
+## Payouts (redeem) and receipts
+
+```
+POST /api/user/redeem?lite=1  { coinsAmount, paymentMethod, accountTitle, accountNumber, bankName? }
+→ 200 { success, redemption, ... }                     (coins are deducted now; refunded if rejected)
+GET  /api/user/redeem                                   Authorization: Bearer <accessToken>
+→ 200 { items: [ { id, coinsAmount, pkrAmount, paymentMethod, accountTitle, accountNumber, bankName,
+                   status: "PENDING" | "PAID" | "REJECTED", transactionRef, receiptUrl, adminNotes,
+                   createdAt, processedAt } ] }         newest first
+```
+- **PAID:** show `transactionRef` and the receipt picture from `receiptUrl` (always a JPG / PNG / WebP image).
+  The link is signed for that one file and works for at least a day: load it as given, and fetch the list
+  again rather than storing the link.
+- **REJECTED:** show `adminNotes` (the reason); the coins are already back in the balance.
+- **PENDING:** `receiptUrl` and `transactionRef` are `null`.

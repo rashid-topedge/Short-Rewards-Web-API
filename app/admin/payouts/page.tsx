@@ -34,6 +34,10 @@ export default function AdminPayoutsPage() {
   const limit = 20;
 
   const [settings, setSettings] = useState<SystemSettings | null>(null);
+  // Coin rate and minimum payout, sent with the list (lead moderators can't read Settings).
+  const [rates, setRates] = useState<{ coinToPkrRate: number; minRedeemCoins: number } | null>(null);
+  // Only the admin may change conversion / storage settings; lead moderators process payouts.
+  const [isAdmin, setIsAdmin] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
     coinToPkrRate: 0.10,
@@ -50,6 +54,9 @@ export default function AdminPayoutsPage() {
   const [isProcessModalOpen, setIsProcessModalOpen] = useState(false);
   const [transactionRef, setTransactionRef] = useState("");
   const [receiptUrl, setReceiptUrl] = useState("");
+  // What the receipt looks like: the uploaded file itself (the bucket is private,
+  // so the stored link only opens once signed) or a pasted link.
+  const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
   const [adminNotes, setAdminNotes] = useState("");
   const [uploadingReceipt, setUploadingReceipt] = useState(false);
   const [showReceiptUploader, setShowReceiptUploader] = useState(false);
@@ -72,6 +79,7 @@ export default function AdminPayoutsPage() {
         const data = await res.json();
         setRedemptions(data.items || []);
         setTotal(data.total || 0);
+        if (data.rates) setRates(data.rates);
         setNextCursor(data.nextCursor ?? null);
       }
     } catch (err) {
@@ -83,6 +91,10 @@ export default function AdminPayoutsPage() {
 
   const fetchSettings = async () => {
     try {
+      const me = await fetch("/api/admin/me").then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const admin = me?.role === "admin";
+      setIsAdmin(admin);
+      if (!admin) return;
       const res = await fetch("/api/admin/settings");
       if (res.ok) {
         const data = await res.json();
@@ -132,39 +144,10 @@ export default function AdminPayoutsPage() {
     setSelectedRedemption(r);
     setTransactionRef("");
     setReceiptUrl("");
+    setReceiptPreview(null);
     setAdminNotes("");
     setProcessError("");
     setIsProcessModalOpen(true);
-  };
-
-  const handleReceiptUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploadingReceipt(true);
-    setProcessError("");
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await fetch("/api/admin/upload-receipt", {
-        method: "POST",
-        body: formData,
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { success: boolean; url?: string; error?: string; message?: string };
-        if (data.success && data.url) {
-          setReceiptUrl(data.url);
-        } else {
-          setProcessError(data.error || data.message || "Failed to upload receipt");
-        }
-      } else {
-        const errData = await res.json();
-        setProcessError(errData.error || "Failed to upload receipt");
-      }
-    } catch {
-      setProcessError("Network error uploading receipt");
-    } finally {
-      setUploadingReceipt(false);
-    }
   };
 
   const handleReceiptUrlSubmit = async () => {
@@ -248,12 +231,14 @@ export default function AdminPayoutsPage() {
             Review user coin-to-PKR redemption requests, disburse funds, and record verified payout receipts.
           </p>
         </div>
-        <button
-          onClick={() => setIsSettingsModalOpen(true)}
-          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#1e293b] hover:bg-[#334155] border border-slate-700 text-slate-200 text-xs font-semibold transition"
-        >
-          <Settings className="w-4 h-4 text-neutral-400" /> Conversion Settings
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setIsSettingsModalOpen(true)}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#1e293b] hover:bg-[#334155] border border-slate-700 text-slate-200 text-xs font-semibold transition"
+          >
+            <Settings className="w-4 h-4 text-neutral-400" /> Conversion Settings
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -274,10 +259,10 @@ export default function AdminPayoutsPage() {
             Exchange Rate
           </span>
           <div className="text-2xl font-extrabold text-white flex items-center gap-1.5">
-            <Coins className="w-5 h-5 text-amber-400" /> 1 Coin = {settings?.coinToPkrRate ?? 0.10} PKR
+            <Coins className="w-5 h-5 text-amber-400" /> 1 Coin = {settings?.coinToPkrRate ?? rates?.coinToPkrRate ?? 0.10} PKR
           </div>
           <p className="text-[11px] text-neutral-500 font-mono">
-            1,000 Coins = {((settings?.coinToPkrRate ?? 0.10) * 1000).toFixed(0)} PKR
+            1,000 Coins = {((settings?.coinToPkrRate ?? rates?.coinToPkrRate ?? 0.10) * 1000).toFixed(0)} PKR
           </p>
         </div>
 
@@ -286,10 +271,10 @@ export default function AdminPayoutsPage() {
             Minimum Threshold
           </span>
           <div className="text-2xl font-extrabold text-white flex items-center gap-1.5">
-            <ShieldCheck className="w-5 h-5 text-cyan-400" /> {settings?.minRedeemCoins ?? 500} Coins
+            <ShieldCheck className="w-5 h-5 text-cyan-400" /> {settings?.minRedeemCoins ?? rates?.minRedeemCoins ?? 500} Coins
           </div>
           <p className="text-[11px] text-neutral-500 font-mono">
-            Min payout: {((settings?.minRedeemCoins ?? 500) * (settings?.coinToPkrRate ?? 0.10)).toFixed(0)} PKR
+            Min payout: {((settings?.minRedeemCoins ?? rates?.minRedeemCoins ?? 500) * (settings?.coinToPkrRate ?? rates?.coinToPkrRate ?? 0.10)).toFixed(0)} PKR
           </p>
         </div>
 
@@ -558,7 +543,10 @@ export default function AdminPayoutsPage() {
                     type="url"
                     placeholder="https://... or upload receipt"
                     value={receiptUrl}
-                    onChange={(e) => setReceiptUrl(e.target.value)}
+                    onChange={(e) => {
+                      setReceiptUrl(e.target.value);
+                      setReceiptPreview(e.target.value.trim() || null);
+                    }}
                     onBlur={handleReceiptUrlSubmit}
                     className="flex-1 bg-[#161c28] border border-[#222c3f] rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
                   />
@@ -577,17 +565,18 @@ export default function AdminPayoutsPage() {
                     <FileUploadManager
                       folderType="payouts"
                       targetName={(selectedRedemption?.id ? `payout_${selectedRedemption.id}` : `payout_${Date.now()}`).toString().replace(/[^a-z0-9_-]/gi, "_")}
-                      accept="image/*,application/pdf"
+                      // Images only: the app shows the receipt as a picture.
+                      accept="image/jpeg,image/png,image/webp"
+                      allowFolder={false}
                       compact={true}
                       onFileUploaded={(result) => {
-                        setReceiptUrl(result.url);
-                        if (selectedRedemption?.id) {
-                          fetch(`/api/admin/redemptions/${selectedRedemption.id}`, {
-                            method: "PATCH",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ receiptUrl: result.url }),
-                          }).catch(() => {});
+                        if (!result.file.type.startsWith("image/")) {
+                          setProcessError("The receipt must be an image (JPG, PNG or WebP) so the app can show it.");
+                          return;
                         }
+                        setReceiptUrl(result.url);
+                        setReceiptPreview(URL.createObjectURL(result.file));
+                        setProcessError("");
                       }}
                     />
                   </div>
@@ -598,10 +587,20 @@ export default function AdminPayoutsPage() {
                     <Loader2 className="w-3 h-3 animate-spin" /> Uploading receipt image or registering URL...
                   </p>
                 )}
-                {receiptUrl && (
+                {receiptUrl && receiptPreview && (
                   <div className="relative aspect-video max-h-36 rounded-lg overflow-hidden border border-[#222c3f] mt-2 bg-black">
-                    <Image src={receiptUrl} alt="Receipt preview" fill unoptimized className="object-contain" />
+                    <Image
+                      src={receiptPreview}
+                      alt="Receipt preview"
+                      fill
+                      unoptimized
+                      className="object-contain"
+                      onError={() => setReceiptPreview(null)}
+                    />
                   </div>
+                )}
+                {receiptUrl && !receiptPreview && (
+                  <p className="text-[11px] text-neutral-400 pt-1">Receipt attached (no preview for this link).</p>
                 )}
               </div>
 
@@ -677,7 +676,7 @@ export default function AdminPayoutsPage() {
         </div>
       )}
 
-      {isSettingsModalOpen && (
+      {isAdmin && isSettingsModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="w-full max-w-lg rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
             <div className="flex items-center justify-between border-b border-[#1a2333] pb-3">

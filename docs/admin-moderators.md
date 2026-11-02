@@ -5,7 +5,7 @@ The console has three roles.
 | | Admin | Lead moderator | Moderator |
 |---|---|---|---|
 | Sign-in | Admin account stored in the database; changed on **My Account** | Account created on **Team** | Account created on **Team** |
-| Pages | Everything | **Dramas**, **Reels**, **Rewards**, **Team** | **Dramas** and **Reels** (other pages redirect to Reels) |
+| Pages | Everything | **Dramas**, **Reels**, **Payouts**, **Rewards**, **Team** | **Dramas** and **Reels** (other pages redirect to Reels) |
 | Create dramas | Yes | Yes | Yes |
 | Edit / publish / delete dramas, add / remove / upload episodes | Any drama | Own dramas + plain moderators' dramas | Own dramas only |
 | Dramas with no creator (imported/older) | Yes | No (view only) | No (view only) |
@@ -15,10 +15,12 @@ The console has three roles.
 | Delete reels | Any reel | Own reels + plain moderators' reels | Own reels (published or not) |
 | Admin's or another lead's reels | Yes | No | No |
 | Coin rewards (Rewards page) | Yes | Yes (logged under their name) | No |
+| Payouts: confirm (with ref + screenshot) or reject (coins refunded) | Yes | Yes (logged under their name) | No |
+| Payout conversion rate, minimum and storage settings | Yes | No (shown, not editable) | No |
 | Add moderators, rename, reset password, disable, remove | Yes, anyone | Plain moderators only | No |
 | Make / remove lead moderator | Yes | No | No |
 | Approve / reject | Yes (**Waiting for approval** tab) | No (approval is currently off) | No |
-| Dramas, users, payouts, transactions, referrals, settings, activity | Yes | No | No |
+| Users, transactions, referrals, settings, activity | Yes | No | No |
 
 ## Dramas
 

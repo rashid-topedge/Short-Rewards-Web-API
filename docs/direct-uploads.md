@@ -100,3 +100,17 @@ In **Upload reels**, "Split videos longer than 3 minutes into 3-minute parts" is
 - **Private bucket.** Covers, videos and thumbnails are served with signed links (valid for at least a day), in the app API and in the console.
 - `cover_url_b2` and `url_b2` are kept, unused, for later.
 - The old scraper import scripts (`migrate.js`, `migrate-table.js`, `migrate-episodes-*.js`, `setup-turso-tables.js`) write the old columns; don't run them against this database.
+
+## Checking a bucket for real (Settings → Full check)
+
+Each bucket on **Storage & B2 Keys** has a **Full check (saved settings)** button (admin only). It runs the real path once against Backblaze and reports every step:
+
+1. Settings found, and the key is accepted.
+2. Key permissions: `writeFiles`, `shareFiles` (signed links), `readFiles`, `listFiles`, `deleteFiles`.
+3. Bucket found; for **payouts** a public bucket is an error (receipts show account details).
+4. Uploads a 1×1 test image, makes the link the app would get, and downloads the image through it.
+5. Checks that an unsigned link is refused (private bucket).
+6. Checks direct browser uploads (needed on Vercel for files over 4.5 MB).
+7. Deletes the test file.
+
+If **Signed link** fails, the app can't show screenshots, covers or videos from that bucket: create a key with `shareFiles`. Whether a bucket is private or public is re-checked every 10 minutes, so switching it in Backblaze takes effect without a redeploy.

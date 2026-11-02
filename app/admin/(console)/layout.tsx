@@ -52,6 +52,7 @@ export default async function AdminLayout({
     ? [
         { label: "Dramas & Series", href: "/admin/dramas", icon: Tv2 },
         { label: "Reels & Shorts", href: "/admin/reels", icon: Video },
+        { label: "Payouts & Redemptions", href: "/admin/payouts", icon: CreditCard },
         { label: "Rewards", href: "/admin/rewards", icon: Gift },
         { label: "Team", href: "/admin/team", icon: UserCog },
       ]

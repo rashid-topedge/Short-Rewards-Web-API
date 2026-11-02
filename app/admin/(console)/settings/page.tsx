@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import StorageCheck from "@/components/admin/StorageCheck";
 import {
   Cloud,
   CheckCircle2,
@@ -313,6 +314,8 @@ export default function AdminSettingsPage() {
             </div>
           )}
 
+          <StorageCheck folderType="dramas" />
+
           <div className="space-y-3 text-xs">
             <div className="space-y-1">
               <label className="font-semibold text-neutral-300">Key ID (applicationKeyId)</label>
@@ -406,6 +409,8 @@ export default function AdminSettingsPage() {
             </div>
           )}
 
+          <StorageCheck folderType="reels" />
+
           <div className="space-y-3 text-xs">
             <div className="space-y-1">
               <label className="font-semibold text-neutral-300">Key ID (applicationKeyId)</label>
@@ -498,6 +503,8 @@ export default function AdminSettingsPage() {
               {testResults.payouts.message}
             </div>
           )}
+
+          <StorageCheck folderType="payouts" />
 
           <div className="space-y-3 text-xs">
             <div className="space-y-1">

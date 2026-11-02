@@ -40,7 +40,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing required initialization fields" }, { status: 400 });
     }
     if (!canUploadTo(staff, folderType)) {
-      return NextResponse.json({ error: "Moderators can only upload reels and drama files." }, { status: 403 });
+      return NextResponse.json(
+        { error: folderType === "payouts" ? "Only the admin and lead moderators can upload payout receipts." : "Moderators can only upload reels and drama files." },
+        { status: 403 }
+      );
     }
     if (totalChunks > MAX_CHUNKS || chunkSize > MAX_CHUNK_BYTES) {
       return NextResponse.json({ error: "File too large or chunk size too big" }, { status: 400 });

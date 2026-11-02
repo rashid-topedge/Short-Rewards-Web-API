@@ -282,7 +282,7 @@ export default function EpisodeUploadDialog({
         e.preventDefault();
         close();
       }}
-      className="m-auto h-full max-h-[92vh] w-full max-w-3xl bg-transparent p-2 text-neutral-100 backdrop:bg-black/80 backdrop:backdrop-blur-sm sm:p-4"
+      className="m-auto h-[100dvh] max-h-[100dvh] w-full max-w-3xl bg-transparent p-0 text-neutral-100 backdrop:bg-black/80 backdrop:backdrop-blur-sm sm:h-[92vh] sm:max-h-[92vh] sm:p-4"
     >
       <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-[#26324a] bg-[#0d121c] shadow-2xl">
         <div className="flex items-start justify-between gap-3 border-b border-[#1e283b] px-5 py-4">
@@ -308,7 +308,7 @@ export default function EpisodeUploadDialog({
           {announcement}
         </p>
 
-        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-5 py-4">
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -450,7 +450,7 @@ export default function EpisodeUploadDialog({
                           maxLength={120}
                           onChange={(e) => patch(d.key, { title: e.target.value })}
                           placeholder="Episode title (optional)"
-                          className="h-9 min-w-0 flex-1 rounded-lg border border-[#2b3850] bg-[#161c28] px-2.5 text-sm text-white placeholder:text-neutral-500 focus:border-rose-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60 disabled:opacity-60"
+                          className="h-9 min-w-0 flex-1 basis-full sm:basis-0 rounded-lg border border-[#2b3850] bg-[#161c28] px-2.5 text-sm text-white placeholder:text-neutral-500 focus:border-rose-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60 disabled:opacity-60"
                         />
                         <label className="flex cursor-pointer items-center gap-1.5 text-xs text-neutral-200">
                           <input

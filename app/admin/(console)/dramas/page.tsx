@@ -789,15 +789,17 @@ export default function AdminDramasPage() {
 
       {/* Drama Create / Edit Modal */}
       {isDramaModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <div className="w-full max-w-xl rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-[#1a2333] pb-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-2 sm:p-4">
+          {/* Scrolls inside when taller than the screen (cover uploader, preview); the title bar stays put. */}
+          <div className="w-full max-w-xl max-h-[96dvh] sm:max-h-[92dvh] overflow-y-auto overscroll-contain rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="sticky -top-6 z-10 -mx-6 -mt-6 px-6 pt-6 bg-[#0f141f] flex items-center justify-between border-b border-[#1a2333] pb-4">
               <h2 className="text-base font-bold text-white flex items-center gap-2">
                 <Tv2 className="w-4 h-4 text-rose-500" />
                 {editingDrama ? "Edit Drama Series" : "Create New Drama"}
               </h2>
               <button
                 onClick={() => setIsDramaModalOpen(false)}
+                aria-label="Close"
                 className="text-neutral-500 hover:text-white"
               >
                 <X className="w-5 h-5" />
@@ -947,9 +949,10 @@ export default function AdminDramasPage() {
 
       {/* Episode Manager Modal */}
       {isEpisodeModalOpen && currentDrama && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <div className="w-full max-w-3xl rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-6 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-[#1a2333] pb-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-2 sm:p-4">
+          {/* Scrolls inside when taller than the screen; the title bar stays put. */}
+          <div className="w-full max-w-3xl max-h-[96dvh] sm:max-h-[92dvh] overflow-y-auto overscroll-contain rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-6 animate-in fade-in zoom-in-95 duration-200">
+            <div className="sticky -top-6 z-10 -mx-6 -mt-6 px-6 pt-6 bg-[#0f141f] flex items-center justify-between border-b border-[#1a2333] pb-4">
               <div>
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
                   <ListVideo className="w-4 h-4 text-rose-500" /> Episode Manager
@@ -958,6 +961,7 @@ export default function AdminDramasPage() {
               </div>
               <button
                 onClick={() => setIsEpisodeModalOpen(false)}
+                aria-label="Close"
                 className="text-neutral-500 hover:text-white"
               >
                 <X className="w-5 h-5" />
@@ -1053,7 +1057,7 @@ export default function AdminDramasPage() {
             </form>
 
             {/* Episodes List */}
-            <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+            <div className="space-y-2">
               {loadingEpisodes ? (
                 <div className="py-8 text-center text-xs text-neutral-500 flex items-center justify-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin text-rose-500" /> Loading episodes...

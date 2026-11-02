@@ -114,9 +114,9 @@ export default function TeamPage() {
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-neutral-300">
             <strong className="text-white">Moderators</strong> use the Reels page: they upload, publish, edit and delete
-            their own reels only. <strong className="text-white">Lead moderators</strong> also get Rewards and Team: they
-            can add and manage moderators and edit, unpublish or delete moderators&apos; reels (not the admin&apos;s or
-            another lead&apos;s).
+            their own reels only. <strong className="text-white">Lead moderators</strong> also get Payouts, Rewards and
+            Team: they confirm or reject payouts and upload payment screenshots, add and manage moderators, and edit,
+            unpublish or delete moderators&apos; reels (not the admin&apos;s or another lead&apos;s).
           </p>
         </div>
         <button

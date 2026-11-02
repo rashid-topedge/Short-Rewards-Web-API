@@ -247,12 +247,18 @@ export async function testB2Connection(creds: {
   }
 }
 
-// Bucket names/types never change for a bucket id, so cache them for the process.
-const bucketInfoCache = new Map<string, { bucketName: string | null; bucketType: string | null }>();
+// A bucket's name never changes, but its type (private / public) can be switched
+// in Backblaze, so re-check every 10 minutes (signing depends on it).
+const BUCKET_INFO_TTL_MS = 10 * 60 * 1000;
+const bucketInfoCache = new Map<string, { bucketName: string | null; bucketType: string | null; at: number }>();
 
-async function getBucketInfo(client: B2, bucketId: string): Promise<{ bucketName: string | null; bucketType: string | null }> {
+async function getBucketInfo(
+  client: B2,
+  bucketId: string,
+  fresh = false
+): Promise<{ bucketName: string | null; bucketType: string | null }> {
   const cached = bucketInfoCache.get(bucketId);
-  if (cached) return cached;
+  if (cached && !fresh && Date.now() - cached.at < BUCKET_INFO_TTL_MS) return cached;
 
   let info: { bucketName: string | null; bucketType: string | null } = { bucketName: null, bucketType: null };
   try {
@@ -271,8 +277,17 @@ async function getBucketInfo(client: B2, bucketId: string): Promise<{ bucketName
       // ignore
     }
   }
-  if (info.bucketName) bucketInfoCache.set(bucketId, info);
+  if (info.bucketName) bucketInfoCache.set(bucketId, { ...info, at: Date.now() });
   return info;
+}
+
+/** Bucket name and type ("allPrivate" / "allPublic") for a bucket ID. Cached. */
+export async function getBucketDetails(
+  client: B2,
+  bucketId: string,
+  options: { fresh?: boolean } = {}
+): Promise<{ bucketName: string | null; bucketType: string | null }> {
+  return getBucketInfo(client, bucketId, options.fresh === true);
 }
 
 /**

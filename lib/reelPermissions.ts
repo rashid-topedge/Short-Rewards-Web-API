@@ -99,9 +99,10 @@ export function actorOf(session: StaffSession) {
 
 /**
  * Upload routes: admins may upload anywhere; moderators to the reels and
- * dramas folders (never payout receipts). Nothing is ever overwritten: every
- * upload gets a free file name.
+ * dramas folders; lead moderators also payout receipts. Nothing is ever
+ * overwritten: every upload gets a free file name.
  */
 export function canUploadTo(session: StaffSession, folderType: string | null | undefined): boolean {
-  return session.role === "admin" || folderType === "reels" || folderType === "dramas";
+  if (session.role === "admin" || folderType === "reels" || folderType === "dramas") return true;
+  return folderType === "payouts" && session.lead;
 }

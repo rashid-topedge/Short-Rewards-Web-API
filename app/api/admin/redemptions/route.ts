@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAuthenticatedAdmin } from "@/lib/auth";
-import { listRedemptionsAdmin } from "@/lib/db";
+import { getStaffSession, isAdminOrLead } from "@/lib/auth";
+import { getSystemSettings, listRedemptionsAdmin } from "@/lib/db";
 import { getUrlSigner } from "@/lib/b2";
 
+/** GET /api/admin/redemptions: payout requests (admin and lead moderators). */
 export async function GET(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
+  if (!isAdminOrLead(await getStaffSession(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -23,9 +24,14 @@ export async function GET(req: NextRequest) {
   });
 
   // Receipts may live in a private bucket; give the admin page playable links.
-  const sign = await getUrlSigner("payouts", data.items.map((r) => r.receiptUrl || ""));
+  const [sign, settings] = await Promise.all([
+    getUrlSigner("payouts", data.items.map((r) => r.receiptUrl || "")),
+    getSystemSettings(),
+  ]);
   return NextResponse.json({
     ...data,
+    // The two numbers the payouts page shows (the rest of Settings, with the storage keys, stays admin-only).
+    rates: { coinToPkrRate: settings.coinToPkrRate, minRedeemCoins: settings.minRedeemCoins },
     items: data.items.map((r) => ({ ...r, receiptUrl: r.receiptUrl ? sign(r.receiptUrl) : r.receiptUrl })),
   });
 }

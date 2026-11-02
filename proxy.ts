@@ -6,7 +6,7 @@ import { getStaffSession, isAdminOrLead } from "@/lib/auth";
 /**
  * Admin console page routing (pages only; every API checks the session itself).
  * - No valid session → /admin/login
- * - Moderators → only Reels and Dramas; lead moderators also Rewards and Team. Anything
+ * - Moderators → only Reels and Dramas; lead moderators also Rewards, Team and Payouts. Anything
  *   else sends them to Reels.
  *
  * This checks the token signature (secret from the database, cached). Disabled
@@ -16,7 +16,7 @@ import { getStaffSession, isAdminOrLead } from "@/lib/auth";
 /** Console pages moderators may open. */
 const MODERATOR_PAGES = ["/admin/reels", "/admin/dramas"];
 /** Extra pages for lead moderators. */
-const LEAD_PAGES = ["/admin/rewards", "/admin/team"];
+const LEAD_PAGES = ["/admin/rewards", "/admin/team", "/admin/payouts"];
 
 const under = (pathname: string, pages: string[]) => pages.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 

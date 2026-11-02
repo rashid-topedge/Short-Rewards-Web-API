@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import path from "path";
-import { isAuthenticatedAdmin } from "@/lib/auth";
+import { getStaffSession, isAdminOrLead } from "@/lib/auth";
 import { getB2ConfigForFolder, getUrlSigner, saveBufferLocally, uploadBufferToB2 } from "@/lib/b2";
 
 const MAX_RECEIPT_BYTES = 10 * 1024 * 1024;
 
 export async function POST(req: NextRequest) {
-  if (!(await isAuthenticatedAdmin(req))) {
+  if (!isAdminOrLead(await getStaffSession(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
