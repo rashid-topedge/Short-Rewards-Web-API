@@ -10,6 +10,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     actorId: session.actorId,
     role: session.role,
+    lead: session.lead,
     username: session.username,
     displayName: session.displayName,
     pendingReviewCount: session.role === "admin" ? await countPendingReviews() : 0,

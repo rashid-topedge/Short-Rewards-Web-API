@@ -59,3 +59,29 @@ right away after a redeploy/restart).
   created after May 2020 do).
 - The admin console must be served over HTTPS (or localhost), which browsers
   require for computing SHA-1 checksums.
+
+## Splitting long videos into parts
+
+In **Upload reels**, "Split videos longer than 3 minutes into 3-minute parts" is on by default.
+
+- Runs in the browser (`lib/mp4Split.ts`), before uploading: no ffmpeg, no server work, no re-encoding.
+  Cuts are made at the nearest keyframe, so parts are about 3 minutes (a few seconds either way).
+- A 7-minute video becomes 3 reels: "Title (Part 1/3)" 3:00, "(Part 2/3)" 3:00, "(Part 3/3)" 1:00.
+  A last part under 30 seconds is added to the previous part instead (e.g. 6:20 → 3:00 + 3:20).
+- Parts share one `part_group` in the `reels` table (`part_number`, `part_count`); each pays its own reward.
+  The app gets them with `GET /api/reels?partGroup=…` (see docs/user-auth-api.md).
+- MP4/MOV only. WebM/MKV and fragmented MP4 files upload whole, with a note on the card.
+- Videos 3:30 or shorter (3 minutes + the 30-second merge allowance) aren't split.
+
+## File names in the bucket
+
+- Files keep their own name, cleaned for URLs: spaces and symbols become `-` ("My Clip (1).mp4" → `My-Clip-1.mp4`). Letters outside A–Z (e.g. Urdu) can't be used in the name; a name with none left becomes `video.mp4` / `file.jpg`.
+- If the name is already taken in that folder (in B2, or by another upload in progress), the file becomes `My-Clip-2.mp4`, `-3`, … Nothing is ever overwritten. (Before, every reel and moderator upload got a random prefix like `m2x9k1_a3f9c0_`.)
+- The final name is returned as `storedAs` by `/api/admin/upload-chunk/init`.
+
+## Drama folders
+
+- Each drama has its own folder: `dramas/<dramaId>-<title>/` (e.g. `dramas/42-love-war/`), saved in `dramas.storage_folder` the first time something is uploaded for it. It stays the same if the title changes later.
+- A new drama's cover, uploaded before the drama is saved, goes to `dramas/<title>-<random>/`, and the drama keeps using that folder.
+- Older files stay where they are; only new uploads use the new folders.
+- **Episodes → Upload episodes** uploads many videos at once (2 in parallel, straight to B2). Numbers come from the file names ("EP 05.mp4", "S01E05", "Drama_5.mp4" → 5; quality tags like "720p" are ignored); files without a number get the next free number. An existing episode is only replaced if you tick "Replace".

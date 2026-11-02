@@ -9,7 +9,20 @@ import {
   moderatorEditReel,
   updateReelAdmin,
 } from "@/lib/db";
-import { actorOf, MODERATOR_APPROVAL_REQUIRED, reelChangesFromBody, reelPermissions } from "@/lib/reelPermissions";
+import {
+  actorOf,
+  canManageReel,
+  MODERATOR_APPROVAL_REQUIRED,
+  reelChangesFromBody,
+  reelPermissions,
+} from "@/lib/reelPermissions";
+
+/** " (uploaded by Sara)" when a lead moderator acts on someone else's reel. */
+function ownerNote(session: { role: string; actorId: string }, reel: { createdById: string | null; createdByName: string | null }) {
+  return session.role !== "admin" && reel.createdById !== session.actorId
+    ? ` (uploaded by ${reel.createdByName || "another moderator"})`
+    : "";
+}
 
 type Ctx = { params: Promise<{ reelId: string }> };
 
@@ -30,7 +43,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 /**
  * PUT /api/admin/reels/:id
  * Admin: edits anything, including publishing.
- * Moderator (own reels only): edits title/description/tags/drama/episode,
+ * Moderator (own reels; a lead moderator also plain moderators' reels): edits title/description/tags/drama/episode,
  * may replace the video or thumbnail, and publish/unpublish. Changes apply
  * immediately (approval is off). Never view/like counts.
  * APPROVAL FLOW (disabled): on a live reel the edits were saved as pending
@@ -50,8 +63,16 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
     if (!before) return NextResponse.json({ error: "Reel not found" }, { status: 404 });
 
     if (session.role === "moderator" && !MODERATOR_APPROVAL_REQUIRED) {
-      if (before.createdById !== session.actorId) {
-        return NextResponse.json({ error: "You can only change reels you uploaded.", code: "NOT_OWNER" }, { status: 403 });
+      if (!canManageReel(session, before.createdById)) {
+        return NextResponse.json(
+          {
+            error: session.lead
+              ? "You can only change your own reels and other moderators' reels (not the admin's or another lead's)."
+              : "You can only change reels you uploaded.",
+            code: "NOT_OWNER",
+          },
+          { status: 403 }
+        );
       }
       const changes = reelChangesFromBody(body);
       if (changes.title !== undefined && !changes.title.trim()) {
@@ -76,9 +97,11 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         action: onlyToggle ? (publish ? "reel.published" : "reel.unpublished") : "reel.edited",
         entityType: "reel",
         entityId: id,
-        summary: onlyToggle
-          ? `${publish ? "Published" : "Unpublished"} "${reel.title}"`
-          : `Edited "${reel.title}"${toggled ? (publish ? " and published it" : " and unpublished it") : ""}`,
+        summary:
+          (onlyToggle
+            ? `${publish ? "Published" : "Unpublished"} "${reel.title}"`
+            : `Edited "${reel.title}"${toggled ? (publish ? " and published it" : " and unpublished it") : ""}`) +
+          ownerNote(session, before),
         details: Object.keys(changes).length ? { fields: Object.keys(changes) } : null,
       });
       cleanUpStorageLater(); // in case the video or thumbnail was replaced
@@ -174,7 +197,8 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
 
 /**
  * DELETE /api/admin/reels/:id
- * Admin: any reel. Moderator: only their own reel that was never published.
+ * Admin: any reel. Moderator: only reels they uploaded (published or not).
+ * Lead moderator: also plain moderators' reels.
  */
 export async function DELETE(req: NextRequest, ctx: Ctx) {
   const auth = await requireStaff(req);
@@ -186,12 +210,16 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
   if (!id || !reel) return NextResponse.json({ error: "Reel not found" }, { status: 404 });
 
   if (session.role === "moderator") {
-    const result = await moderatorDeleteReel(id, session.actorId);
+    const result = await moderatorDeleteReel(id, (createdById) => canManageReel(session, createdById));
     if (!result.ok) {
       const messages = {
         not_found: ["Reel not found", 404],
-        not_owner: ["You can only delete reels you uploaded.", 403],
-        was_published: ["Reels that have been published can't be deleted. You can unpublish it instead.", 403],
+        not_owner: [
+          session.lead
+            ? "You can only delete your own reels and other moderators' reels (not the admin's or another lead's)."
+            : "You can only delete reels you uploaded.",
+          403,
+        ],
       } as const;
       const [error, status] = messages[result.reason];
       return NextResponse.json({ error, code: result.reason.toUpperCase() }, { status });
@@ -204,7 +232,7 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
     action: "reel.deleted",
     entityType: "reel",
     entityId: id,
-    summary: `Deleted "${reel.title}"`,
+    summary: `Deleted "${reel.title}"${ownerNote(session, reel)}`,
   });
   cleanUpStorageLater();
   return NextResponse.json({ success: true, message: "Reel deleted successfully" });

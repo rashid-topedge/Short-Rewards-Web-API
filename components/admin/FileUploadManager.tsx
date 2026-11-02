@@ -51,6 +51,8 @@ export interface UploadItem {
 interface FileUploadManagerProps {
   folderType: FolderType;
   targetName: string;
+  /** Drama files: the server stores them in this drama's own folder (targetName is ignored). */
+  dramaId?: number;
   allowFolder?: boolean;
   accept?: string;
   compact?: boolean;
@@ -63,6 +65,7 @@ const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB per chunk
 export default function FileUploadManager({
   folderType,
   targetName,
+  dramaId,
   allowFolder = true,
   accept,
   compact = false,
@@ -267,6 +270,7 @@ export default function FileUploadManager({
             fileSize: item.fileSize,
             folderType: item.folderType,
             targetName: item.targetName || targetName,
+            dramaId,
             totalChunks: item.totalChunks,
             chunkSize: item.chunkSize,
             mimeType: item.file.type || "application/octet-stream",

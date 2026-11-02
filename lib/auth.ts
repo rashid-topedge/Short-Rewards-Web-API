@@ -7,6 +7,7 @@ import {
   getAdminAccount,
   getStaffAccount,
   getStaffAccountByUsername,
+  listLeadModeratorActorIds,
   recordStaffLogin,
   type StaffAccount,
 } from "@/lib/db";
@@ -19,6 +20,8 @@ export { COOKIE_NAME };
  * (admin_users), so credentials can change without a redeploy:
  * - admin:     one account (role 'admin'); full access. Changed on the Account page.
  * - moderator: accounts created on the Team page; Reels section only.
+ *   A moderator marked "lead" also gets Rewards and Team: they can add and
+ *   manage plain moderators and edit/unpublish/delete plain moderators' reels.
  *
  * The admin account is created once from ADMIN_USERNAME / ADMIN_PASSWORD if
  * those are set and no admin exists yet; after that the variables are ignored.
@@ -37,9 +40,13 @@ export type StaffSession = {
   accountId: number;
   /** Set for moderators only. */
   moderatorId: number | null;
+  /** Lead moderator (never true for the admin, who can do everything anyway). */
+  lead: boolean;
+  /** For lead moderators: actor ids of all leads (whose reels/accounts they can't manage). */
+  leadActorIds: string[];
 };
 
-function sessionForAccount(a: StaffAccount): StaffSession {
+function sessionForAccount(a: StaffAccount, leadActorIds: string[] = []): StaffSession {
   if (a.role === "admin") {
     return {
       actorId: "admin",
@@ -48,6 +55,8 @@ function sessionForAccount(a: StaffAccount): StaffSession {
       displayName: a.displayName || "Admin",
       accountId: a.id,
       moderatorId: null,
+      lead: false,
+      leadActorIds: [],
     };
   }
   return {
@@ -57,7 +66,14 @@ function sessionForAccount(a: StaffAccount): StaffSession {
     displayName: a.displayName || a.username,
     accountId: a.id,
     moderatorId: a.id,
+    lead: a.lead,
+    leadActorIds: a.lead ? leadActorIds : [],
   };
+}
+
+/** Admin, or a lead moderator: may open Rewards and Team. */
+export function isAdminOrLead(session: StaffSession | null | undefined): session is StaffSession {
+  return !!session && (session.role === "admin" || session.lead);
 }
 
 /** Signs a session token for the account with the database-stored secret. */
@@ -144,7 +160,11 @@ export async function authenticateStaff(
 
   failures.delete(key);
   await recordStaffLogin(account.id);
-  return { ok: true, session: sessionForAccount(account), token: await issueStaffToken(account) };
+  return {
+    ok: true,
+    session: sessionForAccount(account, account.lead ? await leadIds() : []),
+    token: await issueStaffToken(account),
+  };
 }
 
 // ------------------------------------------------------------------
@@ -158,6 +178,17 @@ const accountCache = new Map<string, { at: number; value: StaffAccount | null }>
 /** Call after changing a moderator account, so the change applies at once. */
 export function forgetStaffAccountCache(id: number): void {
   accountCache.delete(`mod:${id}`);
+  leadCache = null;
+}
+
+let leadCache: { at: number; value: string[] } | null = null;
+
+/** Actor ids of all lead moderators (cached like accounts). */
+async function leadIds(): Promise<string[]> {
+  if (!leadCache || Date.now() - leadCache.at > ACCOUNT_CACHE_MS) {
+    leadCache = { at: Date.now(), value: await listLeadModeratorActorIds() };
+  }
+  return leadCache.value;
 }
 
 /** Call after changing the admin account. */
@@ -188,7 +219,7 @@ async function sessionFromToken(token: string | null | undefined): Promise<Staff
   const account = await accountForSid(payload.sid);
   if (!account || account.disabled || account.sessionVersion !== payload.ver) return null;
   if (account.role !== payload.role) return null;
-  return sessionForAccount(account);
+  return sessionForAccount(account, account.lead ? await leadIds() : []);
 }
 
 function tokenFromRequest(req?: NextRequest): string | undefined {

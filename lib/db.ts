@@ -81,6 +81,8 @@ interface DramaListRow {
   episode_count: number | null;
   latest_episode_label: string | null;
   is_published: number;
+  created_by_id?: string | null;
+  created_by_name?: string | null;
 }
 
 interface DramaDetailRow extends DramaListRow {
@@ -111,6 +113,9 @@ interface ReelRow {
   is_published: number;
   created_at: number;
   updated_at: number;
+  part_group?: string | null;
+  part_number?: number | null;
+  part_count?: number | null;
   // admin-only columns (present when selected with REEL_ADMIN_COLUMNS)
   created_by_id?: string | null;
   created_by_name?: string | null;
@@ -228,7 +233,7 @@ async function initDb(): Promise<DbApi> {
 
 // Bump this whenever `statements` below changes. On a cold start we read one
 // row instead of re-running ~40 DDL statements against Turso.
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 14;
 
 async function createSchema(db: QueryApi): Promise<void> {
   await db.run(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
@@ -385,6 +390,11 @@ async function createSchema(db: QueryApi): Promise<void> {
       PRIMARY KEY (user_id, claim_id)
     )`,
     `CREATE INDEX IF NOT EXISTS idx_claim_keys_created ON reward_claim_keys (created_at)`,
+    // ---- v12: long videos split into parts (one reel per part, linked)
+    `ALTER TABLE reels ADD COLUMN part_group TEXT`,
+    `ALTER TABLE reels ADD COLUMN part_number INTEGER`,
+    `ALTER TABLE reels ADD COLUMN part_count INTEGER`,
+    `CREATE INDEX IF NOT EXISTS idx_reels_part_group ON reels (part_group, part_number) WHERE part_group IS NOT NULL`,
     // ---- v11: referrals
     `ALTER TABLE users ADD COLUMN referral_code TEXT`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code ON users (referral_code) WHERE referral_code IS NOT NULL`,
@@ -427,6 +437,8 @@ async function createSchema(db: QueryApi): Promise<void> {
       updated_at REAL NOT NULL,
       last_login_at REAL
     )`,
+    // ---- v13: lead moderators
+    `ALTER TABLE admin_users ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE reels ADD COLUMN created_by_id TEXT`,
     `ALTER TABLE reels ADD COLUMN created_by_name TEXT`,
     `ALTER TABLE reels ADD COLUMN updated_by_name TEXT`,
@@ -488,6 +500,13 @@ async function createSchema(db: QueryApi): Promise<void> {
       status TEXT NOT NULL DEFAULT 'uploading',
       created_at REAL NOT NULL
     )`,
+    // ---- v14: B2 names keep the original file name (claimed per upload); drama owners & folders
+    `CREATE INDEX IF NOT EXISTS idx_upload_sessions_name ON upload_sessions (b2_file_name)`,
+    `ALTER TABLE dramas ADD COLUMN created_by_id TEXT`,
+    `ALTER TABLE dramas ADD COLUMN created_by_name TEXT`,
+    // This drama's own folder in the bucket ("<id>-<title-slug>"), fixed once set.
+    `ALTER TABLE dramas ADD COLUMN storage_folder TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_dramas_owner ON dramas (created_by_id, drama_id DESC)`,
     `CREATE TABLE IF NOT EXISTS upload_session_parts (
       session_id TEXT NOT NULL,
       chunk_index INTEGER NOT NULL,
@@ -544,6 +563,8 @@ function mapDramaCard(row: DramaListRow): DramaCard {
     episodeCount: row.episode_count ?? 0,
     latestEpisodeLabel: row.latest_episode_label,
     isPublished: Boolean(row.is_published),
+    createdById: row.created_by_id ?? null,
+    createdByName: row.created_by_name ?? null,
   };
 }
 
@@ -564,6 +585,9 @@ function mapReelItem(row: ReelRow): ReelItem {
     isPublished: Boolean(row.is_published),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(row.part_group
+      ? { part: { group: row.part_group, number: row.part_number ?? 1, count: row.part_count ?? 1 } }
+      : {}),
   };
 }
 
@@ -874,7 +898,8 @@ export async function listEpisodes(dramaId: number, includeUnpublished = false):
 const REEL_COLUMNS = `
     r.reel_id, r.title, r.synopsis, r.video_url, r.thumbnail_url, r.duration_seconds,
     r.drama_id, d.title as drama_title, r.episode_number, r.tags_json, r.view_count,
-    r.like_count, r.is_published, r.created_at, r.updated_at`;
+    r.like_count, r.is_published, r.created_at, r.updated_at,
+    r.part_group, r.part_number, r.part_count`;
 
 /** REEL_COLUMNS plus ownership/review fields; admin console only (never the public API). */
 const REEL_ADMIN_COLUMNS = `${REEL_COLUMNS},
@@ -1148,12 +1173,24 @@ async function listReelsForUser(options: {
   };
 }
 
+/** All published parts of a video that was split into several reels, in order. */
+export async function listReelParts(group: string): Promise<ReelItem[]> {
+  const db = await getDb();
+  const rows = (await db.all(
+    `SELECT ${REEL_COLUMNS} FROM reels r LEFT JOIN dramas d ON r.drama_id = d.drama_id
+     WHERE r.part_group = ? AND r.is_published = 1 ORDER BY r.part_number ASC LIMIT 50`,
+    [group]
+  )) as ReelRow[];
+  return rows.map(mapReelItem);
+}
+
 export async function getReel(reelId: number, includeUnpublished = false): Promise<ReelItem | null> {
   const db = await getDb();
   let sql = `
     SELECT r.reel_id, r.title, r.synopsis, r.video_url, r.thumbnail_url, r.duration_seconds,
            r.drama_id, d.title as drama_title, r.episode_number, r.tags_json, r.view_count,
-           r.like_count, r.is_published, r.created_at, r.updated_at
+           r.like_count, r.is_published, r.created_at, r.updated_at,
+           r.part_group, r.part_number, r.part_count
     FROM reels r
     LEFT JOIN dramas d ON r.drama_id = d.drama_id
     WHERE r.reel_id = ?
@@ -2414,15 +2451,15 @@ async function computeAdminDashboardStats(): Promise<AdminDashboardStats> {
   };
 }
 
-export async function listDramasAdmin(options: {
+export type DramaAdminFilter = {
   query?: string;
   status?: "all" | "published" | "draft";
-  limit?: number;
-  offset?: number;
-  cursor?: string | null;
-}): Promise<AdminPage<DramaCard>> {
-  const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
-  const offset = Math.max(0, options.offset ?? 0);
+  /** Only dramas created by this staff member ("admin" / "mod:<id>"). */
+  createdById?: string;
+};
+
+/** WHERE clauses for the admin dramas list (no table alias). */
+function dramaAdminFilter(options: DramaAdminFilter): { where: string[]; params: InValue[] } {
   const query = options.query?.trim();
   const status = options.status || "all";
   const where: string[] = [];
@@ -2433,11 +2470,29 @@ export async function listDramasAdmin(options: {
   }
   if (status === "published") where.push("is_published = 1");
   else if (status === "draft") where.push("is_published = 0");
+  if (options.createdById) {
+    where.push("created_by_id = ?");
+    params.push(options.createdById);
+  }
+  return { where, params };
+}
+
+export async function listDramasAdmin(options: {
+  query?: string;
+  status?: "all" | "published" | "draft";
+  createdById?: string;
+  limit?: number;
+  offset?: number;
+  cursor?: string | null;
+}): Promise<AdminPage<DramaCard>> {
+  const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+  const offset = Math.max(0, options.offset ?? 0);
+  const { where, params } = dramaAdminFilter(options);
 
   const { total, rows, nextCursor } = await keysetPage<DramaListRow>({
     table: "dramas",
     select:
-      "SELECT drama_id, slug, title, cover, play_count, episode_count, latest_episode_label, is_published FROM dramas",
+      "SELECT drama_id, slug, title, cover, play_count, episode_count, latest_episode_label, is_published, created_by_id, created_by_name FROM dramas",
     from: "FROM dramas",
     where,
     params,
@@ -2461,6 +2516,10 @@ export async function createDramaAdmin(data: {
   episodeCount?: number;
   latestEpisodeLabel?: string;
   isPublished?: boolean;
+  /** Who created it (for moderator permissions). */
+  createdBy?: { id: string; name: string } | null;
+  /** Bucket folder already used for this drama's cover (from a cover upload before it existed). */
+  storageFolder?: string | null;
 }): Promise<DramaCard> {
   invalidateCounts("dramas");
   const db = await getDb();
@@ -2478,9 +2537,10 @@ export async function createDramaAdmin(data: {
     INSERT INTO dramas (
       slug, title, cover, synopsis, tags_json,
       play_count, like_count, episode_count, latest_episode_label,
-      is_published, raw_json, fetched_at, created_at, updated_at
+      is_published, raw_json, fetched_at, created_at, updated_at,
+      created_by_id, created_by_name, storage_folder
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, datetime('now'), datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, datetime('now'), datetime('now'), ?, ?, ?)
   `,
     [
       slug,
@@ -2494,11 +2554,61 @@ export async function createDramaAdmin(data: {
       data.latestEpisodeLabel?.trim() || null,
       isPublishedVal,
       now,
+      data.createdBy?.id ?? null,
+      data.createdBy?.name ?? null,
+      data.storageFolder ?? null,
     ]
   );
 
   const row = (await db.get("SELECT * FROM dramas WHERE slug = ?", [slug])) as DramaDetailRow;
   return mapDramaCard(row);
+}
+
+export type DramaOwnerInfo = {
+  dramaId: number;
+  title: string | null;
+  createdById: string | null;
+  createdByName: string | null;
+  storageFolder: string | null;
+};
+
+/** Who owns a drama and which bucket folder it uses (for permission checks and uploads). */
+export async function getDramaOwnerInfo(dramaId: number): Promise<DramaOwnerInfo | null> {
+  const db = await getDb();
+  const row = (await db.get(
+    "SELECT drama_id, title, created_by_id, created_by_name, storage_folder FROM dramas WHERE drama_id = ?",
+    [dramaId]
+  )) as
+    | { drama_id: number; title: string | null; created_by_id: string | null; created_by_name: string | null; storage_folder: string | null }
+    | undefined;
+  return row
+    ? {
+        dramaId: row.drama_id,
+        title: row.title,
+        createdById: row.created_by_id,
+        createdByName: row.created_by_name,
+        storageFolder: row.storage_folder,
+      }
+    : null;
+}
+
+/** True if another drama already uses this bucket folder. */
+export async function dramaStorageFolderInUse(folder: string): Promise<boolean> {
+  const db = await getDb();
+  return Boolean(await db.get("SELECT 1 FROM dramas WHERE storage_folder = ? LIMIT 1", [folder]));
+}
+
+/**
+ * The drama's bucket folder, assigned on first use (`proposed`, normally
+ * "<id>-<title-slug>") and then kept, even if the title changes later.
+ */
+export async function ensureDramaStorageFolder(dramaId: number, proposed: string): Promise<string | null> {
+  const db = await getDb();
+  await db.run("UPDATE dramas SET storage_folder = ? WHERE drama_id = ? AND storage_folder IS NULL", [proposed, dramaId]);
+  const row = (await db.get("SELECT storage_folder FROM dramas WHERE drama_id = ?", [dramaId])) as
+    | { storage_folder: string | null }
+    | undefined;
+  return row?.storage_folder ?? null;
 }
 
 export async function updateDramaAdmin(
@@ -2570,30 +2680,106 @@ export async function updateDramaAdmin(
   return getDrama(dramaId, true);
 }
 
-export async function deleteDramaAdmin(dramaId: number): Promise<boolean> {
+/**
+ * Deletes a drama with its episodes and linked reels. `mayDeleteReel` (for
+ * moderators) limits which linked reels are deleted: the others are only
+ * unlinked from the drama and stay. `mayDeleteDrama` is checked inside the
+ * transaction; returns false if the drama is missing or not allowed.
+ */
+export async function deleteDramaAdmin(
+  dramaId: number,
+  opts: { mayDeleteDrama?: (createdById: string | null) => boolean; mayDeleteReel?: (createdById: string | null) => boolean } = {}
+): Promise<boolean> {
   invalidateCounts("dramas");
   invalidateCounts("reels");
   const db = await getDb();
-  await db.tx(async (tx) => {
-    const drama = (await tx.get("SELECT cover FROM dramas WHERE drama_id = ?", [dramaId])) as
-      | { cover: string | null }
+  return db.tx(async (tx) => {
+    const drama = (await tx.get("SELECT cover, created_by_id FROM dramas WHERE drama_id = ?", [dramaId])) as
+      | { cover: string | null; created_by_id: string | null }
       | undefined;
+    if (!drama) return false;
+    if (opts.mayDeleteDrama && !opts.mayDeleteDrama(drama.created_by_id ?? null)) return false;
     const episodes = (await tx.all("SELECT url FROM episodes WHERE drama_id = ?", [dramaId])) as {
       url: string | null;
     }[];
-    const reels = (await tx.all("SELECT video_url, thumbnail_url FROM reels WHERE drama_id = ?", [dramaId])) as {
-      video_url: string | null;
-      thumbnail_url: string | null;
-    }[];
+    const allReels = (await tx.all("SELECT reel_id, video_url, thumbnail_url, created_by_id FROM reels WHERE drama_id = ?", [
+      dramaId,
+    ])) as { reel_id: number; video_url: string | null; thumbnail_url: string | null; created_by_id: string | null }[];
+    const reels = opts.mayDeleteReel ? allReels.filter((r) => opts.mayDeleteReel!(r.created_by_id ?? null)) : allReels;
+    const kept = allReels.filter((r) => !reels.includes(r));
 
     await tx.run("DELETE FROM episodes WHERE drama_id = ?", [dramaId]);
-    await tx.run("DELETE FROM reels WHERE drama_id = ?", [dramaId]);
+    if (reels.length) {
+      await tx.run(`DELETE FROM reels WHERE reel_id IN (${reels.map(() => "?").join(",")})`, reels.map((r) => r.reel_id));
+    }
+    if (kept.length) {
+      await tx.run(
+        `UPDATE reels SET drama_id = NULL, episode_number = NULL WHERE reel_id IN (${kept.map(() => "?").join(",")})`,
+        kept.map((r) => r.reel_id)
+      );
+    }
     await tx.run("DELETE FROM dramas WHERE drama_id = ?", [dramaId]);
 
-    await enqueueFileDeletes(tx, "dramas", [drama?.cover, ...episodes.map((e) => e.url)]);
+    await enqueueFileDeletes(tx, "dramas", [drama.cover, ...episodes.map((e) => e.url)]);
     await enqueueFileDeletes(tx, "reels", reels.flatMap((r) => [r.video_url, r.thumbnail_url]));
+    return true;
   });
-  return true;
+}
+
+/**
+ * Admin: deletes many dramas (with their episodes and linked reels, like a
+ * single delete). Pass ids, or a filter (+ ids to keep) to delete every drama
+ * matching the admin list's search/status. Batches of 25 dramas, each one
+ * write transaction; files go to the Backblaze delete queue.
+ */
+export async function bulkDeleteDramasAdmin(
+  target: { dramaIds: number[] } | { filter: DramaAdminFilter; excludeIds?: number[] }
+): Promise<number> {
+  const BATCH = 25;
+  const db = await getDb();
+  let deleted = 0;
+
+  const deleteIds = async (ids: number[]) => {
+    if (!ids.length) return 0;
+    const ph = ids.map(() => "?").join(",");
+    return db.tx(async (tx) => {
+      const covers = (await tx.all(`SELECT cover FROM dramas WHERE drama_id IN (${ph})`, ids)) as { cover: string | null }[];
+      const eps = (await tx.all(`SELECT url FROM episodes WHERE drama_id IN (${ph})`, ids)) as { url: string | null }[];
+      const reels = (await tx.all(`SELECT video_url, thumbnail_url FROM reels WHERE drama_id IN (${ph})`, ids)) as {
+        video_url: string | null;
+        thumbnail_url: string | null;
+      }[];
+      await tx.run(`DELETE FROM episodes WHERE drama_id IN (${ph})`, ids);
+      await tx.run(`DELETE FROM reels WHERE drama_id IN (${ph})`, ids);
+      const res = await tx.run(`DELETE FROM dramas WHERE drama_id IN (${ph})`, ids);
+      await enqueueFileDeletes(tx, "dramas", [...covers.map((c) => c.cover), ...eps.map((e) => e.url)]);
+      await enqueueFileDeletes(tx, "reels", reels.flatMap((r) => [r.video_url, r.thumbnail_url]));
+      return res.changes;
+    });
+  };
+
+  if ("dramaIds" in target) {
+    const ids = [...new Set(target.dramaIds.filter((n) => Number.isInteger(n) && n > 0))];
+    for (let i = 0; i < ids.length; i += BATCH) deleted += await deleteIds(ids.slice(i, i + BATCH));
+  } else {
+    const { where, params } = dramaAdminFilter(target.filter);
+    const keep = [...new Set((target.excludeIds ?? []).filter((n) => Number.isInteger(n) && n > 0))];
+    if (keep.length) {
+      where.push(`drama_id NOT IN (${keep.map(() => "?").join(",")})`);
+      params.push(...keep);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    for (let guard = 0; guard < 100_000; guard++) {
+      const rows = (await db.all(`SELECT drama_id FROM dramas ${whereSql} ORDER BY drama_id LIMIT ?`, [...params, BATCH])) as {
+        drama_id: number;
+      }[];
+      if (!rows.length) break;
+      deleted += await deleteIds(rows.map((r) => r.drama_id));
+    }
+  }
+  invalidateCounts("dramas");
+  invalidateCounts("reels");
+  return deleted;
 }
 
 export async function bulkUpdateDramasPublish(
@@ -2656,9 +2842,11 @@ export async function saveEpisodeAdmin(
     );
     await tx.run(
       `UPDATE dramas
-       SET episode_count = (SELECT COUNT(*) FROM episodes WHERE drama_id = ?), latest_episode_label = 'EP ' || ?, updated_at = datetime('now')
+       SET episode_count = (SELECT COUNT(*) FROM episodes WHERE drama_id = ?),
+           latest_episode_label = 'EP ' || (SELECT MAX(ep) FROM episodes WHERE drama_id = ?),
+           updated_at = datetime('now')
        WHERE drama_id = ?`,
-      [dramaId, ep, dramaId]
+      [dramaId, dramaId, dramaId]
     );
     if (old?.url && old.url !== url.trim()) await enqueueFileDeletes(tx, "dramas", [old.url]);
   });
@@ -2798,6 +2986,8 @@ export async function createReelAdmin(data: {
   createdBy?: { id: string; name: string };
   /** Moderator reels start as 'draft' or 'pending' (never published directly). */
   reviewStatus?: ReelReviewStatus;
+  /** One part of a longer video split into several reels. */
+  part?: { group: string; number: number; count: number } | null;
 }): Promise<ReelItem> {
   invalidateCounts("reels");
   const db = await getDb();
@@ -2811,9 +3001,10 @@ export async function createReelAdmin(data: {
         title, synopsis, video_url, thumbnail_url, duration_seconds,
         drama_id, episode_number, tags_json, view_count, like_count,
         is_published, created_at, updated_at,
-        created_by_id, created_by_name, updated_by_name, review_status, first_published_at
+        created_by_id, created_by_name, updated_by_name, review_status, first_published_at,
+        part_group, part_number, part_count
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       data.title.trim(),
@@ -2832,6 +3023,9 @@ export async function createReelAdmin(data: {
       data.createdBy?.name ?? null,
       data.reviewStatus ?? null,
       pubVal ? now : null,
+      data.part?.group ?? null,
+      data.part?.number ?? null,
+      data.part?.count ?? null,
     ]
   );
 
@@ -3225,6 +3419,54 @@ function mapUploadSession(r: UploadSessionRow): UploadSession {
     status: r.status as UploadSession["status"],
     createdAt: r.created_at,
   };
+}
+
+/** Upload sessions older than this no longer reserve their file name. */
+const SESSION_NAME_HOLD_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Creates the upload session only if no other upload in progress already uses
+ * the same B2 file name (one statement, so two uploads can't both get it).
+ * Returns false if the name is taken.
+ */
+export async function claimUploadSession(session: Omit<UploadSession, "status" | "createdAt">): Promise<boolean> {
+  const db = await getDb();
+  const now = Date.now();
+  const res = await db.run(
+    `
+    INSERT INTO upload_sessions (
+      session_id, file_name, folder_type, target_name, b2_file_name, b2_file_id,
+      mime_type, file_size, total_chunks, chunk_size, status, created_at
+    )
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?
+    WHERE NOT EXISTS (
+      SELECT 1 FROM upload_sessions WHERE b2_file_name = ? AND folder_type = ? AND created_at > ?
+    )
+  `,
+    [
+      session.sessionId,
+      session.fileName,
+      session.folderType,
+      session.targetName,
+      session.b2FileName,
+      session.b2FileId,
+      session.mimeType,
+      session.fileSize,
+      session.totalChunks,
+      session.chunkSize,
+      now,
+      session.b2FileName,
+      session.folderType,
+      now - SESSION_NAME_HOLD_MS,
+    ]
+  );
+  return res.changes === 1;
+}
+
+/** Stores the B2 large-file id once it has been started (after the name was claimed). */
+export async function setUploadSessionFileId(sessionId: string, b2FileId: string): Promise<void> {
+  const db = await getDb();
+  await db.run("UPDATE upload_sessions SET b2_file_id = ? WHERE session_id = ?", [b2FileId, sessionId]);
 }
 
 export async function createUploadSession(session: Omit<UploadSession, "status" | "createdAt">): Promise<void> {
@@ -3796,6 +4038,7 @@ interface AdminUserRow {
   role: string;
   password_hash: string;
   disabled: number;
+  is_lead?: number | null;
   session_version: number;
   created_at: number;
   last_login_at: number | null;
@@ -3806,6 +4049,7 @@ function mapStaffAccount(r: AdminUserRow): StaffAccount {
     id: r.id,
     username: r.username,
     displayName: r.display_name,
+    lead: r.role === "moderator" && Boolean(r.is_lead),
     disabled: Boolean(r.disabled),
     createdAt: r.created_at,
     lastLoginAt: r.last_login_at,
@@ -3922,9 +4166,18 @@ export async function recordStaffLogin(id: number): Promise<void> {
   await db.run("UPDATE admin_users SET last_login_at = ? WHERE id = ?", [Date.now(), id]);
 }
 
+/** Actor ids ("mod:<id>") of all lead moderators. */
+export async function listLeadModeratorActorIds(): Promise<string[]> {
+  const db = await getDb();
+  const rows = (await db.all("SELECT id FROM admin_users WHERE role = 'moderator' AND is_lead = 1")) as { id: number }[];
+  return rows.map((r) => `mod:${r.id}`);
+}
+
 export async function listStaffAccounts(): Promise<StaffAccountInfo[]> {
   const db = await getDb();
-  const rows = (await db.all("SELECT * FROM admin_users WHERE role = 'moderator' ORDER BY disabled ASC, username COLLATE NOCASE ASC")) as AdminUserRow[];
+  const rows = (await db.all(
+    "SELECT * FROM admin_users WHERE role = 'moderator' ORDER BY is_lead DESC, disabled ASC, username COLLATE NOCASE ASC"
+  )) as AdminUserRow[];
   return rows.map((r) => {
     const { passwordHash: _hash, sessionVersion: _ver, role: _role, ...info } = mapStaffAccount(r);
     void _hash;
@@ -3938,14 +4191,15 @@ export async function createStaffAccount(input: {
   username: string;
   displayName: string;
   passwordHash: string;
+  lead?: boolean;
 }): Promise<{ ok: true; id: number } | { ok: false; reason: "taken" }> {
   const db = await getDb();
   const now = Date.now();
   const res = await db.run(
-    `INSERT INTO admin_users (username, display_name, password_hash, role, created_at, updated_at)
-     VALUES (?, ?, ?, 'moderator', ?, ?)
+    `INSERT INTO admin_users (username, display_name, password_hash, role, is_lead, created_at, updated_at)
+     VALUES (?, ?, ?, 'moderator', ?, ?, ?)
      ON CONFLICT(username) DO NOTHING`,
-    [input.username, input.displayName, input.passwordHash, now, now]
+    [input.username, input.displayName, input.passwordHash, input.lead ? 1 : 0, now, now]
   );
   if (res.changes !== 1) return { ok: false, reason: "taken" };
   return { ok: true, id: Number(res.lastInsertRowid) };
@@ -3954,7 +4208,8 @@ export async function createStaffAccount(input: {
 /** Changing the password or disabling signs the moderator out everywhere (session_version + 1). */
 export async function updateStaffAccount(
   id: number,
-  changes: { displayName?: string; passwordHash?: string; disabled?: boolean }
+  changes: { displayName?: string; passwordHash?: string; disabled?: boolean; lead?: boolean },
+  opts: { onlyIfNotLead?: boolean } = {}
 ): Promise<boolean> {
   const db = await getDb();
   const sets: string[] = ["updated_at = ?"];
@@ -3962,6 +4217,10 @@ export async function updateStaffAccount(
   if (changes.displayName !== undefined) {
     sets.push("display_name = ?");
     params.push(changes.displayName);
+  }
+  if (changes.lead !== undefined) {
+    sets.push("is_lead = ?");
+    params.push(changes.lead ? 1 : 0);
   }
   if (changes.passwordHash !== undefined) {
     sets.push("password_hash = ?");
@@ -3975,15 +4234,22 @@ export async function updateStaffAccount(
     sets.push("session_version = session_version + 1");
   }
   params.push(id);
-  // Team-page changes only ever touch moderator accounts.
-  const res = await db.run(`UPDATE admin_users SET ${sets.join(", ")} WHERE id = ? AND role = 'moderator'`, params);
+  // Team-page changes only ever touch moderator accounts; a lead moderator's
+  // changes (onlyIfNotLead) only touch plain moderators.
+  const res = await db.run(
+    `UPDATE admin_users SET ${sets.join(", ")} WHERE id = ? AND role = 'moderator'${opts.onlyIfNotLead ? " AND is_lead = 0" : ""}`,
+    params
+  );
   return res.changes === 1;
 }
 
 /** Removes the login. Their reels stay, still showing who uploaded them. */
-export async function deleteStaffAccount(id: number): Promise<boolean> {
+export async function deleteStaffAccount(id: number, opts: { onlyIfNotLead?: boolean } = {}): Promise<boolean> {
   const db = await getDb();
-  const res = await db.run("DELETE FROM admin_users WHERE id = ? AND role = 'moderator'", [id]);
+  const res = await db.run(
+    `DELETE FROM admin_users WHERE id = ? AND role = 'moderator'${opts.onlyIfNotLead ? " AND is_lead = 0" : ""}`,
+    [id]
+  );
   return res.changes === 1;
 }
 
@@ -4269,20 +4535,30 @@ export async function moderatorEditReel(
   return { ok: true, mode: outcome.mode, reel: reel! };
 }
 
-/** A moderator deletes their own reel; only if it was never published. */
+/**
+ * A moderator deletes a reel they may manage (published or not): their own,
+ * or, for a lead moderator, a plain moderator's. `mayDelete` gets the reel's
+ * created_by_id and is checked inside the transaction.
+ */
 export async function moderatorDeleteReel(
   reelId: number,
-  actorId: string
-): Promise<{ ok: true } | { ok: false; reason: "not_found" | "not_owner" | "was_published" }> {
+  mayDelete: (createdById: string | null) => boolean
+): Promise<{ ok: true } | { ok: false; reason: "not_found" | "not_owner" }> {
+  invalidateCounts("reels");
   const db = await getDb();
-  const row = (await db.get("SELECT created_by_id, is_published, first_published_at FROM reels WHERE reel_id = ?", [
-    reelId,
-  ])) as { created_by_id: string | null; is_published: number; first_published_at: number | null } | undefined;
-  if (!row) return { ok: false, reason: "not_found" };
-  if (row.created_by_id !== actorId) return { ok: false, reason: "not_owner" };
-  if (row.is_published || row.first_published_at) return { ok: false, reason: "was_published" };
-  await deleteReelAdmin(reelId);
-  return { ok: true };
+  // Ownership check and delete in one transaction.
+  return db.tx(async (tx) => {
+    const row = (await tx.get("SELECT created_by_id, video_url, thumbnail_url FROM reels WHERE reel_id = ?", [reelId])) as
+      | { created_by_id: string | null; video_url: string | null; thumbnail_url: string | null }
+      | undefined;
+    if (!row) return { ok: false as const, reason: "not_found" as const };
+    if (!row.created_by_id || !mayDelete(row.created_by_id)) return { ok: false as const, reason: "not_owner" as const };
+    // Previous rule: published reels couldn't be deleted by moderators.
+    // if (row.is_published || row.first_published_at) return { ok: false, reason: "was_published" };
+    await tx.run("DELETE FROM reels WHERE reel_id = ? AND created_by_id = ?", [reelId, row.created_by_id]);
+    await enqueueFileDeletes(tx, "reels", [row.video_url, row.thumbnail_url]);
+    return { ok: true as const };
+  });
 }
 
 export type ReviewResult =

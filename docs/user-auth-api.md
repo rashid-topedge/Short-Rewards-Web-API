@@ -200,3 +200,24 @@ Authorization: Bearer <accessToken>    (optional)
 - Responses are per user: don't cache them in a shared cache.
 - "Seen" means "earned coins for". A reel watched without a claim (e.g. after the daily limit)
   stays in the new part, so it can still pay later.
+
+## Multi-part reels (long videos split into 3-minute parts)
+
+When the admin uploads a video longer than 3 minutes, the console can cut it into ~3-minute parts.
+Each part is a normal reel (own `reelId`, own reward, titled e.g. "Title (Part 2/3)") with a `part`
+field linking it to the others:
+
+```json
+"part": { "group": "pg_44d3b3aa82f35d0596", "number": 2, "count": 3 }
+```
+
+- Reels without `part` are single videos (the field is absent).
+- To show "Next part" / "All parts", fetch the group (published parts only, in order, same item
+  shape as the feed, including `rewardCoins`):
+
+  ```
+  GET /api/reels?partGroup=pg_44d3b3aa82f35d0596
+  → { "items": [ { "reelId": 501, "part": { "number": 1, ... } }, ... ] }
+  ```
+- A part can be unpublished or deleted on its own, so `items` can have gaps (e.g. parts 1 and 3).
+  Use `part.number` for labels and the list order for "next".

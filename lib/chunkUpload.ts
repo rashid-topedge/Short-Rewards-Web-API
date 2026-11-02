@@ -23,8 +23,10 @@ const CHUNK_RETRIES = 4;
 export type ChunkUploadOptions = {
   folderType: ChunkFolderType;
   targetName?: string;
-  /** Prefix the stored file name so uploads never overwrite each other. */
+  /** No longer needed: the server never overwrites (it adds -2, -3… to a taken name). */
   uniqueName?: boolean;
+  /** Drama files: store them in this drama's own folder ("dramas/<id>-<title>/"). */
+  dramaId?: number;
   /** For reels: false = don't auto-create a reel row on completion. */
   createReel?: boolean;
   /** Resume an earlier attempt. */
@@ -300,6 +302,7 @@ export async function uploadFileChunked(file: File, options: ChunkUploadOptions)
         chunkSize: CHUNK_SIZE,
         mimeType: contentType,
         uniqueName: options.uniqueName === true,
+        dramaId: options.dramaId,
       }),
     });
     if (!res.ok) throw new Error(await readError(res, "Could not start the upload"));

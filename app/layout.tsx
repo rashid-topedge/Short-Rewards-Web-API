@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Navbar } from "@/components/Navbar";
+import { HideOnAdmin } from "@/components/HideOnAdmin";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -35,10 +36,14 @@ export default function RootLayout({
           <div className="absolute top-[40%] right-[-10%] w-[500px] h-[500px] bg-amber-500/5 blur-[100px] rounded-full pointer-events-none" />
         </div>
 
-        <Navbar />
+        {/* The public site's header and footer aren't shown in the admin console. */}
+        <HideOnAdmin>
+          <Navbar />
+        </HideOnAdmin>
 
         <main className="relative z-10 flex-1 flex flex-col">{children}</main>
 
+        <HideOnAdmin>
         <footer className="relative z-10 border-t border-white/[0.06] bg-zinc-950/60 py-8 backdrop-blur-md mt-auto">
           <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 px-4 sm:flex-row sm:px-6 lg:px-8 text-xs text-zinc-500">
             <div className="flex items-center gap-2">
@@ -49,6 +54,7 @@ export default function RootLayout({
             <p>© {new Date().getFullYear()} DramaFlix. All rights reserved.</p>
           </div>
         </footer>
+        </HideOnAdmin>
       </body>
     </html>
   );

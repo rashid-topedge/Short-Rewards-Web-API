@@ -1,8 +1,26 @@
 "use client";
 
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
-import { AlertCircle, KeyRound, Loader2, Pencil, Plus, ShieldCheck, Trash2, UserCog, UserX, UserCheck, X } from "lucide-react";
-import type { StaffAccountInfo } from "@/lib/types";
+import {
+  AlertCircle,
+  KeyRound,
+  Loader2,
+  Pencil,
+  Plus,
+  ShieldCheck,
+  ShieldMinus,
+  ShieldPlus,
+  Trash2,
+  UserCog,
+  UserX,
+  UserCheck,
+  X,
+} from "lucide-react";
+import type { StaffAccountInfo as BaseAccount } from "@/lib/types";
+
+/** Team rows from the API: `canManage` is false for accounts a lead moderator can't change. */
+type StaffAccountInfo = BaseAccount & { canManage?: boolean };
+type Viewer = { role: "admin" | "moderator"; lead: boolean; accountId: number };
 
 const inputClass =
   "h-11 w-full rounded-xl border border-[#2b3850] bg-[#161c28] px-3 text-sm text-white placeholder:text-neutral-500 focus:border-purple-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60";
@@ -24,6 +42,8 @@ export default function TeamPage() {
   const [loadError, setLoadError] = useState("");
   const [notice, setNotice] = useState("");
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [viewer, setViewer] = useState<Viewer | null>(null);
+  const isAdmin = viewer?.role === "admin";
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -31,7 +51,9 @@ export default function TeamPage() {
     try {
       const res = await fetch("/api/admin/team");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setAccounts((await res.json()).items || []);
+      const data = (await res.json()) as { items?: StaffAccountInfo[]; viewer?: Viewer };
+      setAccounts(data.items || []);
+      setViewer(data.viewer ?? null);
     } catch {
       setLoadError("Couldn't load the team. Check your connection and try again.");
     } finally {
@@ -64,6 +86,18 @@ export default function TeamPage() {
     }
   };
 
+  const toggleLead = async (a: StaffAccountInfo) => {
+    const ask = a.lead
+      ? `Remove lead moderator from ${a.displayName}? They'll keep their own reels but lose Rewards and Team.`
+      : `Make ${a.displayName} a lead moderator? They'll be able to add and manage moderators, edit, unpublish and delete other moderators' reels, and change reward settings.`;
+    if (!window.confirm(ask)) return;
+    try {
+      await patchAccount(a, { lead: !a.lead }, a.lead ? `${a.displayName} is a regular moderator again.` : `${a.displayName} is now a lead moderator.`);
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : "Could not update the account");
+    }
+  };
+
   const remove = async (a: StaffAccountInfo) => {
     if (!window.confirm(`Remove ${a.displayName} (@${a.username})? Their login is deleted. Reels they uploaded stay and keep showing their name.`)) return;
     const res = await fetch(`/api/admin/team/${a.id}`, { method: "DELETE" });
@@ -79,8 +113,10 @@ export default function TeamPage() {
             <UserCog className="h-6 w-6 text-purple-300" aria-hidden="true" /> Team
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-neutral-300">
-            Moderators can only use the Reels section. They can upload reels and edit their own, but nothing goes live
-            until you approve it, and they can never delete a reel that has been published.
+            <strong className="text-white">Moderators</strong> use the Reels page: they upload, publish, edit and delete
+            their own reels only. <strong className="text-white">Lead moderators</strong> also get Rewards and Team: they
+            can add and manage moderators and edit, unpublish or delete moderators&apos; reels (not the admin&apos;s or
+            another lead&apos;s).
           </p>
         </div>
         <button
@@ -108,13 +144,24 @@ export default function TeamPage() {
         )}
       </div>
 
-      <div className="flex items-center gap-3 rounded-2xl border border-[#1e283b] bg-[#0f141f] px-4 py-3 text-sm">
-        <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-400" aria-hidden="true" />
-        <p className="text-neutral-300">
-          <strong className="text-white">Admin</strong> (you) signs in with the username and password from the server&apos;s
-          environment settings and has full access.
-        </p>
-      </div>
+      {viewer && (
+        <div className="flex items-center gap-3 rounded-2xl border border-[#1e283b] bg-[#0f141f] px-4 py-3 text-sm">
+          <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-400" aria-hidden="true" />
+          <p className="text-neutral-300">
+            {isAdmin ? (
+              <>
+                <strong className="text-white">Admin</strong> (you) has full access. Use the shield button on a moderator
+                to make them a lead moderator. Change your own sign-in on My Account.
+              </>
+            ) : (
+              <>
+                You&apos;re a <strong className="text-white">lead moderator</strong>. You can add moderators and reset,
+                disable or remove them. Only the admin can change lead moderators.
+              </>
+            )}
+          </p>
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center gap-2 py-16 text-sm text-neutral-300" role="status">
@@ -139,6 +186,7 @@ export default function TeamPage() {
             <thead className="border-b border-[#1e283b] text-xs uppercase tracking-wide text-neutral-400">
               <tr>
                 <th scope="col" className="px-4 py-3">Moderator</th>
+                <th scope="col" className="px-4 py-3">Role</th>
                 <th scope="col" className="px-4 py-3">Status</th>
                 <th scope="col" className="px-4 py-3">Last sign-in</th>
                 <th scope="col" className="px-4 py-3">Added</th>
@@ -150,7 +198,19 @@ export default function TeamPage() {
                 <tr key={a.id}>
                   <td className="px-4 py-3">
                     <p className="font-semibold text-white">{a.displayName}</p>
-                    <p className="font-mono text-xs text-neutral-400">@{a.username}</p>
+                    <p className="font-mono text-xs text-neutral-400">
+                      @{a.username}
+                      {viewer && a.id === viewer.accountId && " (you)"}
+                    </p>
+                  </td>
+                  <td className="px-4 py-3">
+                    {a.lead ? (
+                      <span className="inline-flex rounded-full bg-purple-500/20 px-2 py-0.5 text-xs font-bold text-purple-200">
+                        Lead moderator
+                      </span>
+                    ) : (
+                      <span className="text-neutral-300">Moderator</span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <span
@@ -164,7 +224,19 @@ export default function TeamPage() {
                   <td className="px-4 py-3 text-neutral-300">{formatWhen(a.lastLoginAt)}</td>
                   <td className="px-4 py-3 text-neutral-300">{new Date(a.createdAt).toLocaleDateString()}</td>
                   <td className="px-4 py-3">
+                    {a.canManage === false ? (
+                      <p className="text-right text-xs text-neutral-500">Admin only</p>
+                    ) : (
                     <div className="flex justify-end gap-1">
+                      {isAdmin && (
+                        <ActionButton
+                          label={a.lead ? `Remove lead moderator from ${a.displayName}` : `Make ${a.displayName} a lead moderator`}
+                          onClick={() => toggleLead(a)}
+                          className={a.lead ? "text-purple-200" : "text-neutral-200"}
+                        >
+                          {a.lead ? <ShieldMinus className="h-4 w-4" aria-hidden="true" /> : <ShieldPlus className="h-4 w-4" aria-hidden="true" />}
+                        </ActionButton>
+                      )}
                       <ActionButton label={`Rename ${a.displayName}`} onClick={() => setDialog({ kind: "rename", account: a })}>
                         <Pencil className="h-4 w-4" aria-hidden="true" />
                       </ActionButton>
@@ -182,6 +254,7 @@ export default function TeamPage() {
                         <Trash2 className="h-4 w-4" aria-hidden="true" />
                       </ActionButton>
                     </div>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -192,6 +265,7 @@ export default function TeamPage() {
 
       <AccountDialog
         state={dialog}
+        canCreateLead={isAdmin}
         onClose={() => setDialog(null)}
         onDone={(msg) => {
           setDialog(null);
@@ -229,10 +303,12 @@ function ActionButton({
 
 function AccountDialog({
   state,
+  canCreateLead,
   onClose,
   onDone,
 }: {
   state: DialogState;
+  canCreateLead: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -244,6 +320,7 @@ function AccountDialog({
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
+  const [lead, setLead] = useState(false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -256,6 +333,7 @@ function AccountDialog({
     setSaving(false);
     setUsername("");
     setPassword("");
+    setLead(false);
     setDisplayName(state && state.kind === "rename" ? state.account.displayName : "");
   }, [state]);
 
@@ -278,7 +356,7 @@ function AccountDialog({
         res = await fetch("/api/admin/team", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: username.trim(), displayName: displayName.trim(), password }),
+          body: JSON.stringify({ username: username.trim(), displayName: displayName.trim(), password, lead: canCreateLead && lead }),
         });
       } else {
         res = await fetch(`/api/admin/team/${state.account.id}`, {
@@ -291,7 +369,7 @@ function AccountDialog({
       if (!res.ok) throw new Error(data.error || "Could not save");
       onDone(
         state.kind === "create"
-          ? `Moderator @${username.trim()} added. Share the username and password with them privately.`
+          ? `${canCreateLead && lead ? "Lead moderator" : "Moderator"} @${username.trim()} added. Share the username and password with them privately.`
           : state.kind === "rename"
           ? "Name updated."
           : `Password reset for ${state.account.displayName}. They've been signed out everywhere.`
@@ -397,6 +475,23 @@ function AccountDialog({
                 At least 10 characters, with letters and numbers. Copy it now: it can&apos;t be shown again.
               </p>
             </div>
+          )}
+
+          {state.kind === "create" && canCreateLead && (
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-[#26324a] bg-[#111827] px-3 py-2.5 text-sm">
+              <input
+                type="checkbox"
+                checked={lead}
+                onChange={(e) => setLead(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-purple-500"
+              />
+              <span>
+                <span className="font-medium text-neutral-100">Lead moderator</span>
+                <span className="block text-xs text-neutral-400">
+                  Can add and manage moderators, edit, unpublish or delete their reels, and change reward settings.
+                </span>
+              </span>
+            </label>
           )}
 
           <div className="flex justify-end gap-2 pt-1">

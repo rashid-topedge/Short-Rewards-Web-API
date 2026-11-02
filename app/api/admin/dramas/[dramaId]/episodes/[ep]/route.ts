@@ -1,20 +1,31 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { processB2DeleteQueue } from "@/lib/b2Cleanup";
-import { isAuthenticatedAdmin } from "@/lib/auth";
-import { deleteEpisodeAdmin } from "@/lib/db";
+import { requireStaff } from "@/lib/auth";
+import { deleteEpisodeAdmin, logActivity } from "@/lib/db";
+import { dramaForChange, dramaOwnerNote } from "@/lib/dramaAccess";
+import { actorOf } from "@/lib/reelPermissions";
 
+/** DELETE: removes one episode and its video file (staff who may change the drama). */
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ dramaId: string; ep: string }> }
 ) {
-  if (!(await isAuthenticatedAdmin(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await requireStaff(req);
+  if (!auth.ok) return auth.response;
+  const { session } = auth;
   const { dramaId, ep } = await params;
   const dId = parseInt(dramaId, 10);
   const epNum = parseInt(ep, 10);
+  const access = await dramaForChange(session, dId);
+  if (!access.ok) return access.response;
 
   const episodes = await deleteEpisodeAdmin(dId, epNum);
+  await logActivity(actorOf(session), {
+    action: "episode.deleted",
+    entityType: "drama",
+    entityId: dId,
+    summary: `Deleted episode ${epNum} of "${access.drama.title}"${dramaOwnerNote(session, access.drama)}`,
+  });
   cleanUpStorageLater();
   return NextResponse.json({ success: true, episodes });
 }

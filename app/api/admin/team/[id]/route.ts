@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { forgetStaffAccountCache, getStaffSession } from "@/lib/auth";
+import { forgetStaffAccountCache, getStaffSession, isAdminOrLead, type StaffSession } from "@/lib/auth";
 import { deleteStaffAccount, getStaffAccount, logActivity, updateStaffAccount } from "@/lib/db";
 import { hashPassword, passwordProblem } from "@/lib/passwords";
 import { actorOf } from "@/lib/reelPermissions";
@@ -14,18 +14,27 @@ async function accountFrom(ctx: Ctx) {
   return account?.role === "moderator" ? account : null;
 }
 
+/** The admin manages every moderator; a lead moderator only plain moderators (not leads, so not themselves). */
+function forbiddenFor(session: StaffSession, account: { lead: boolean }) {
+  if (session.role === "admin" || !account.lead) return null;
+  return NextResponse.json({ error: "Only the admin can change lead moderators." }, { status: 403 });
+}
+
 /**
- * PATCH /api/admin/team/:id  { displayName?, password?, disabled? }
+ * PATCH /api/admin/team/:id  { displayName?, password?, disabled?, lead? }
  * Resetting the password or disabling signs the moderator out everywhere.
+ * `lead` (make / remove lead moderator) is admin-only.
  */
 export async function PATCH(req: NextRequest, ctx: Ctx) {
   const session = await getStaffSession(req);
-  if (session?.role !== "admin") return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!isAdminOrLead(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const account = await accountFrom(ctx);
   if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 });
+  const forbidden = forbiddenFor(session, account);
+  if (forbidden) return forbidden;
 
   const body = await req.json().catch(() => ({}));
-  const changes: { displayName?: string; passwordHash?: string; disabled?: boolean } = {};
+  const changes: { displayName?: string; passwordHash?: string; disabled?: boolean; lead?: boolean } = {};
   const said: string[] = [];
 
   if (typeof body?.displayName === "string") {
@@ -48,9 +57,17 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
     changes.disabled = body.disabled;
     said.push(body.disabled ? "disabled" : "re-enabled");
   }
+  if (typeof body?.lead === "boolean" && body.lead !== account.lead) {
+    if (session.role !== "admin") {
+      return NextResponse.json({ error: "Only the admin can make or remove lead moderators." }, { status: 403 });
+    }
+    changes.lead = body.lead;
+    said.push(body.lead ? "made lead moderator" : "no longer lead moderator");
+  }
   if (!said.length) return NextResponse.json({ success: true });
 
-  await updateStaffAccount(account.id, changes);
+  const updated = await updateStaffAccount(account.id, changes, { onlyIfNotLead: session.role !== "admin" });
+  if (!updated) return NextResponse.json({ error: "Account not found" }, { status: 404 });
   forgetStaffAccountCache(account.id);
   await logActivity(actorOf(session), {
     action: "staff.updated",
@@ -64,11 +81,14 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
 /** DELETE /api/admin/team/:id: removes the login. Their reels and history stay. */
 export async function DELETE(req: NextRequest, ctx: Ctx) {
   const session = await getStaffSession(req);
-  if (session?.role !== "admin") return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!isAdminOrLead(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const account = await accountFrom(ctx);
   if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 });
+  const forbidden = forbiddenFor(session, account);
+  if (forbidden) return forbidden;
 
-  await deleteStaffAccount(account.id);
+  const deleted = await deleteStaffAccount(account.id, { onlyIfNotLead: session.role !== "admin" });
+  if (!deleted) return NextResponse.json({ error: "Account not found" }, { status: 404 });
   forgetStaffAccountCache(account.id);
   await logActivity(actorOf(session), {
     action: "staff.deleted",

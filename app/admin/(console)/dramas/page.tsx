@@ -22,10 +22,37 @@ import {
   UploadCloud,
 } from "lucide-react";
 import FileUploadManager from "@/components/admin/FileUploadManager";
+import EpisodeUploadDialog from "@/components/admin/EpisodeUploadDialog";
 import { useCursorPager } from "@/components/admin/useCursorPager";
 import type { DramaCard, EpisodeItem } from "@/lib/types";
 
+/** Folder name for a new drama's cover, before the drama exists: "love-war-k3x9p2". */
+function newDramaFolder(title: string, suffix: string): string {
+  const slug = title
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60)
+    .replace(/-+$/g, "");
+  return `${slug || "drama"}-${suffix}`;
+}
+
 export default function AdminDramasPage() {
+  // Who is signed in: moderators only manage dramas they created (leads also
+  // plain moderators' dramas); bulk actions are admin-only.
+  const [viewer, setViewer] = useState<{ role: "admin" | "moderator"; lead: boolean } | null>(null);
+  const isAdmin = viewer?.role === "admin";
+  const [mineOnly, setMineOnly] = useState(false);
+  useEffect(() => {
+    fetch("/api/admin/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((me) => me && setViewer({ role: me.role, lead: Boolean(me.lead) }))
+      .catch(() => {});
+  }, []);
+  const canChange = (d: DramaCard) => isAdmin || Boolean(d.permissions?.canEdit);
+
   const [dramas, setDramas] = useState<DramaCard[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -56,6 +83,10 @@ export default function AdminDramasPage() {
   const [showCoverUploader, setShowCoverUploader] = useState(false);
   const [showEpisodeUploader, setShowEpisodeUploader] = useState(false);
   const [submittingDrama, setSubmittingDrama] = useState(false);
+  const [dramaError, setDramaError] = useState("");
+  // New drama: random part of its bucket folder name, and the folder its cover went to.
+  const [folderSuffix, setFolderSuffix] = useState("");
+  const [coverFolder, setCoverFolder] = useState<string | null>(null);
 
   // Episode Manager Modal
   const [isEpisodeModalOpen, setIsEpisodeModalOpen] = useState(false);
@@ -78,6 +109,7 @@ export default function AdminDramasPage() {
         limit: String(limit),
       });
       if (cursor) params.set("cursor", cursor);
+      if (mineOnly) params.set("mine", "1");
       const res = await fetch(`/api/admin/dramas?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
@@ -90,25 +122,100 @@ export default function AdminDramasPage() {
     } finally {
       setLoading(false);
     }
-  }, [searchQuery, statusFilter, cursor, setNextCursor]);
+  }, [searchQuery, statusFilter, cursor, setNextCursor, mineOnly]);
 
   useEffect(() => {
     fetchDramas();
   }, [fetchDramas]);
 
-  // Bulk Selection Handlers
+  // Bulk selection. "Select all N dramas" selects every drama matching the
+  // current search/filter on every page; unticking one then keeps it
+  // (excludedIds), e.g. "delete all but one".
+  const [allMatching, setAllMatching] = useState(false);
+  const [excludedIds, setExcludedIds] = useState<number[]>([]);
+  const [bulkNotice, setBulkNotice] = useState("");
+  const isChecked = (id: number) => (allMatching ? !excludedIds.includes(id) : selectedIds.includes(id));
+  const selectedCount = allMatching ? Math.max(0, total - excludedIds.length) : selectedIds.length;
+  const pageAllChecked = dramas.length > 0 && dramas.every((d) => isChecked(d.dramaId));
+
+  const clearSelection = () => {
+    setAllMatching(false);
+    setExcludedIds([]);
+    setSelectedIds([]);
+  };
+  const selectAllMatching = () => {
+    setAllMatching(true);
+    setExcludedIds([]);
+    setSelectedIds([]);
+  };
+
+  // Page changes keep an "all dramas" selection; a page-only selection and any filter change start over.
+  useEffect(() => setSelectedIds([]), [searchQuery, statusFilter, cursor]);
+  useEffect(() => {
+    setAllMatching(false);
+    setExcludedIds([]);
+  }, [searchQuery, statusFilter]);
+
   const toggleSelectAll = () => {
-    if (selectedIds.length === dramas.length) {
-      setSelectedIds([]);
-    } else {
-      setSelectedIds(dramas.map((d) => d.dramaId));
+    const ids = dramas.map((d) => d.dramaId);
+    if (allMatching) {
+      setExcludedIds((prev) => (pageAllChecked ? [...new Set([...prev, ...ids])] : prev.filter((id) => !ids.includes(id))));
+      return;
     }
+    setSelectedIds(pageAllChecked ? [] : ids);
   };
 
   const toggleSelectDrama = (id: number) => {
+    if (allMatching) {
+      setExcludedIds((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]));
+      return;
+    }
     setSelectedIds((prev) =>
       prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]
     );
+  };
+
+  const handleBulkDelete = async () => {
+    const count = selectedCount;
+    if (count === 0) return;
+    if (allMatching) {
+      const typed = window.prompt(
+        `Delete ${count.toLocaleString()} dramas${searchQuery ? ` matching "${searchQuery}"` : ""}${
+          statusFilter !== "all" ? ` in "${statusFilter}"` : ""
+        }${excludedIds.length ? `, keeping the ${excludedIds.length} you unticked` : ""}?\n\nTheir episodes and linked reels are deleted too, files are removed from storage, and this can't be undone.\n\nType DELETE to confirm.`
+      );
+      if (typed?.trim().toUpperCase() !== "DELETE") return;
+    } else if (
+      !window.confirm(`Delete ${count} selected drama${count === 1 ? "" : "s"} with all their episodes and linked reels? This can't be undone.`)
+    ) {
+      return;
+    }
+    setBulkLoading(true);
+    setBulkNotice("");
+    try {
+      const res = await fetch("/api/admin/dramas/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          allMatching
+            ? { action: "delete", all: true, filter: { q: searchQuery, status: statusFilter }, excludeIds: excludedIds }
+            : { action: "delete", dramaIds: selectedIds }
+        ),
+      });
+      const data = (await res.json().catch(() => ({}))) as { count?: number; error?: string };
+      if (res.ok) {
+        setBulkNotice(`${(data.count ?? count).toLocaleString()} drama(s) deleted.`);
+        clearSelection();
+        resetPager();
+        fetchDramas();
+      } else {
+        setBulkNotice(data.error || "Couldn't delete the dramas. Please try again.");
+      }
+    } catch {
+      setBulkNotice("Couldn't reach the server. Please try again.");
+    } finally {
+      setBulkLoading(false);
+    }
   };
 
   // Bulk Publish / Unpublish
@@ -184,6 +291,9 @@ export default function AdminDramasPage() {
   // Drama Modal Openers
   const openCreateDramaModal = () => {
     setEditingDrama(null);
+    setDramaError("");
+    setCoverFolder(null);
+    setFolderSuffix(Math.random().toString(36).slice(2, 8).padEnd(6, "0"));
     setDramaForm({
       title: "",
       cover: "",
@@ -198,6 +308,7 @@ export default function AdminDramasPage() {
 
   const openEditDramaModal = async (drama: DramaCard) => {
     setEditingDrama(drama);
+    setDramaError("");
     try {
       const res = await fetch(`/api/admin/dramas/${drama.dramaId}`);
       if (res.ok) {
@@ -243,26 +354,42 @@ export default function AdminDramasPage() {
         body: JSON.stringify({
           ...dramaForm,
           tags: dramaForm.tags.split(",").map((t) => t.trim()).filter(Boolean),
+          // Keep the new drama's files in the folder its cover was uploaded to.
+          ...(editingDrama ? {} : { storageFolder: coverFolder }),
         }),
       });
 
       if (res.ok) {
         setIsDramaModalOpen(false);
         fetchDramas();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setDramaError(data.error || "Could not save the drama.");
       }
     } catch (err) {
       console.error("Failed to save drama", err);
+      setDramaError("Could not save the drama. Check your connection and try again.");
     } finally {
       setSubmittingDrama(false);
     }
   };
 
   const handleDeleteDrama = async (dramaId: number) => {
-    if (!confirm("Are you sure you want to delete this drama and all its episodes?")) return;
+    if (
+      !confirm(
+        isAdmin
+          ? "Are you sure you want to delete this drama and all its episodes? Linked reels are deleted too."
+          : "Delete this drama and all its episodes? Your reels linked to it are deleted too; other people's reels are only unlinked."
+      )
+    )
+      return;
     try {
       const res = await fetch(`/api/admin/dramas/${dramaId}`, { method: "DELETE" });
       if (res.ok) {
         fetchDramas();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setBulkNotice(data.error || "Could not delete the drama.");
       }
     } catch (err) {
       console.error("Failed to delete drama", err);
@@ -345,6 +472,7 @@ export default function AdminDramasPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          {isAdmin && (
           <button
             onClick={handlePublishAllWithEpisodes}
             disabled={bulkLoading}
@@ -353,6 +481,7 @@ export default function AdminDramasPage() {
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-400" /> Publish All with Episodes
           </button>
+          )}
 
           <button
             onClick={openCreateDramaModal}
@@ -398,16 +527,49 @@ export default function AdminDramasPage() {
               {st}
             </button>
           ))}
+          <button
+            onClick={() => {
+              setMineOnly((v) => !v);
+              resetPager();
+            }}
+            aria-pressed={mineOnly}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+              mineOnly ? "bg-rose-600 text-white shadow-sm" : "text-neutral-400 hover:text-white"
+            }`}
+          >
+            Mine
+          </button>
         </div>
       </div>
 
+      {bulkNotice && (
+        <div role="status" className="flex items-center justify-between rounded-xl border border-[#2b3850] bg-[#121a29] px-4 py-3 text-xs text-neutral-100">
+          {bulkNotice}
+          <button onClick={() => setBulkNotice("")} className="text-neutral-400 hover:text-white" aria-label="Dismiss message">
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Bulk Action Bar (when items selected) */}
-      {selectedIds.length > 0 && (
-        <div className="flex items-center justify-between p-3.5 rounded-xl bg-rose-950/40 border border-rose-500/40 text-rose-200 text-xs animate-in fade-in duration-200">
-          <div className="flex items-center gap-2">
-            <span className="font-bold text-white">{selectedIds.length}</span> dramas selected
+      {isAdmin && (allMatching || selectedIds.length > 0) && (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between p-3.5 rounded-xl bg-rose-950/40 border border-rose-500/40 text-rose-200 text-xs animate-in fade-in duration-200">
+          <div>
+            {allMatching ? (
+              <>
+                <span className="font-bold text-white">{selectedCount.toLocaleString()}</span> of {total.toLocaleString()} dramas selected
+                {excludedIds.length > 0 ? ` (keeping ${excludedIds.length})` : ""}
+                <span className="block text-[11px] text-rose-200/80">Untick any drama, on any page, to keep it.</span>
+              </>
+            ) : (
+              <>
+                <span className="font-bold text-white">{selectedIds.length}</span> dramas selected
+              </>
+            )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {!allMatching && (
+              <>
             <button
               onClick={() => handleBulkPublish(true)}
               disabled={bulkLoading}
@@ -422,8 +584,18 @@ export default function AdminDramasPage() {
             >
               <EyeOff className="w-3.5 h-3.5" /> Unpublish Selected
             </button>
+              </>
+            )}
             <button
-              onClick={() => setSelectedIds([])}
+              onClick={handleBulkDelete}
+              disabled={bulkLoading}
+              className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold flex items-center gap-1.5 transition disabled:opacity-50"
+            >
+              {bulkLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              {allMatching ? `Delete ${selectedCount.toLocaleString()}` : "Delete Selected"}
+            </button>
+            <button
+              onClick={clearSelection}
               className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-semibold transition"
             >
               Clear
@@ -435,17 +607,29 @@ export default function AdminDramasPage() {
       {/* Total Counter and Select All */}
       <div className="flex items-center justify-between text-xs text-neutral-400 px-1">
         <div className="flex items-center gap-3">
+          {isAdmin && (
+          <>
           <button
             onClick={toggleSelectAll}
             className="flex items-center gap-1.5 hover:text-white transition font-medium"
           >
-            {selectedIds.length === dramas.length && dramas.length > 0 ? (
+            {pageAllChecked ? (
               <CheckSquare className="w-4 h-4 text-rose-500" />
             ) : (
               <Square className="w-4 h-4 text-neutral-500" />
             )}
             Select Page
           </button>
+          {total > 0 && !allMatching && (
+            <button
+              onClick={selectAllMatching}
+              className="font-semibold text-rose-300 underline underline-offset-2 hover:text-white transition"
+            >
+              Select all {total.toLocaleString()} dramas{statusFilter !== "all" || searchQuery ? " in this view" : ""}
+            </button>
+          )}
+          </>
+          )}
           <span>Showing {dramas.length} of {total.toLocaleString()} dramas</span>
         </div>
       </div>
@@ -464,7 +648,8 @@ export default function AdminDramasPage() {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
           {dramas.map((drama) => {
-            const isSelected = selectedIds.includes(drama.dramaId);
+            const isSelected = isChecked(drama.dramaId);
+            const editable = canChange(drama);
             return (
               <div
                 key={drama.dramaId}
@@ -494,6 +679,7 @@ export default function AdminDramasPage() {
                   <div className="absolute inset-0 bg-gradient-to-t from-[#090b10] via-transparent to-black/40" />
 
                   {/* Top Left Selection Checkbox */}
+                  {isAdmin && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -507,16 +693,18 @@ export default function AdminDramasPage() {
                       <Square className="w-4 h-4 text-neutral-400" />
                     )}
                   </button>
+                  )}
 
                   {/* Top Right Published Badge / Toggle */}
                   <button
-                    onClick={(e) => toggleSinglePublish(drama, e)}
+                    onClick={(e) => editable && toggleSinglePublish(drama, e)}
+                    disabled={!editable}
                     className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider backdrop-blur-md flex items-center gap-1 transition ${
                       drama.isPublished
                         ? "bg-emerald-500/80 text-white hover:bg-emerald-600 shadow-sm"
                         : "bg-amber-500/80 text-black hover:bg-amber-600"
                     }`}
-                    title="Click to toggle publish status"
+                    title={editable ? "Click to toggle publish status" : drama.isPublished ? "Published" : "Draft"}
                   >
                     {drama.isPublished ? (
                       <>
@@ -542,10 +730,18 @@ export default function AdminDramasPage() {
 
                 {/* Info & Action Footer */}
                 <div className="p-3 space-y-2.5 flex-1 flex flex-col justify-between">
-                  <h3 className="text-xs font-bold text-white line-clamp-2 leading-snug">
-                    {drama.title || "Untitled Drama"}
-                  </h3>
+                  <div>
+                    <h3 className="text-xs font-bold text-white line-clamp-2 leading-snug">
+                      {drama.title || "Untitled Drama"}
+                    </h3>
+                    {drama.createdByName && drama.createdById !== "admin" && (
+                      <p className="mt-0.5 truncate text-[10px] text-neutral-500">by {drama.createdByName}</p>
+                    )}
+                  </div>
 
+                  {!editable ? (
+                    <p className="pt-2 border-t border-[#1a2333] text-center text-[10px] text-neutral-500">View only</p>
+                  ) : (
                   <div className="grid grid-cols-3 gap-1 pt-1 border-t border-[#1a2333]">
                     <button
                       onClick={() => openEpisodeManager(drama)}
@@ -569,6 +765,7 @@ export default function AdminDramasPage() {
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
+                  )}
                 </div>
               </div>
             );
@@ -617,6 +814,11 @@ export default function AdminDramasPage() {
             </div>
 
             <form onSubmit={handleSaveDrama} className="space-y-4">
+              {dramaError && (
+                <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-100">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /> {dramaError}
+                </div>
+              )}
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-neutral-300">Title</label>
                 <input
@@ -664,12 +866,16 @@ export default function AdminDramasPage() {
                   <div className="p-3.5 rounded-2xl bg-[#0f1422] border border-[#1f2a40] space-y-3">
                     <FileUploadManager
                       folderType="dramas"
-                      targetName={dramaForm.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "drama_cover"}
+                      // Existing drama: its own folder (decided by the server). New drama:
+                      // a folder named after the title; the drama keeps using it once created.
+                      dramaId={editingDrama?.dramaId}
+                      targetName={coverFolder || newDramaFolder(dramaForm.title, folderSuffix)}
                       accept="image/*"
                       compact={true}
                       onFileUploaded={(result) => {
                         if (/\.(jpg|jpeg|png|webp|gif|svg)$/i.test(result.fileName) || result.file.type.startsWith("image/")) {
                           setDramaForm((prev) => ({ ...prev, cover: result.url }));
+                          if (!editingDrama) setCoverFolder((prev) => prev || newDramaFolder(dramaForm.title, folderSuffix));
                         }
                       }}
                     />
@@ -771,6 +977,31 @@ export default function AdminDramasPage() {
               </div>
             )}
 
+            {/* Upload many episode files at once (each drama has its own bucket folder) */}
+            <div className="flex flex-col gap-3 rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-neutral-300">
+                Upload episode videos straight to storage, several at once. Numbers are read from the file names.
+              </p>
+              <button
+                type="button"
+                onClick={() => setShowEpisodeUploader(true)}
+                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300"
+              >
+                <UploadCloud className="h-4 w-4" /> Upload episodes
+              </button>
+            </div>
+            <EpisodeUploadDialog
+              open={showEpisodeUploader}
+              drama={{ dramaId: currentDrama.dramaId, title: currentDrama.title }}
+              existing={episodes}
+              onClose={() => setShowEpisodeUploader(false)}
+              onSaved={(eps) => {
+                setEpisodes(eps);
+                setNewEpisodeForm((prev) => ({ ...prev, ep: (eps.length ? Math.max(...eps.map((e) => e.ep)) : 0) + 1 }));
+                setDramas((prev) => prev.map((d) => (d.dramaId === currentDrama.dramaId ? { ...d, episodeCount: eps.length } : d)));
+              }}
+            />
+
             {/* Add New Episode Form */}
             <form onSubmit={handleAddEpisode} className="flex flex-col sm:flex-row gap-3 p-4 rounded-xl bg-[#161c28] border border-[#222c3f]">
               <div className="w-24">
@@ -790,16 +1021,8 @@ export default function AdminDramasPage() {
               <div className="flex-1 space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
-                    Video Stream URL (.m3u8 / .mp4)
+                    Or paste a video URL (.m3u8 / .mp4)
                   </label>
-                  <button
-                    type="button"
-                    onClick={() => setShowEpisodeUploader(!showEpisodeUploader)}
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-400 hover:text-rose-300 transition"
-                  >
-                    <UploadCloud className="w-3.5 h-3.5" />
-                    {showEpisodeUploader ? "Hide Uploader" : "B2 Cloud Uploader (Progress & Resumable)"}
-                  </button>
                 </div>
 
                 <div className="flex gap-2">
@@ -811,34 +1034,7 @@ export default function AdminDramasPage() {
                     placeholder="https://stream.example.com/drama/ep1.m3u8 or upload video"
                     className="flex-1 bg-[#0f141f] border border-[#2a374f] rounded-lg px-3 py-1.5 text-xs text-white font-mono placeholder:text-neutral-600"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowEpisodeUploader(true)}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#2a374f] hover:bg-[#334155] text-white text-[10px] font-bold transition whitespace-nowrap"
-                  >
-                    <UploadCloud className="w-3.5 h-3.5 text-rose-400" /> Upload Video
-                  </button>
                 </div>
-
-                {showEpisodeUploader && (
-                  <div className="pt-2">
-                    <FileUploadManager
-                      folderType="dramas"
-                      targetName={
-                        currentDrama?.slug ||
-                        currentDrama?.title?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ||
-                        `drama_${currentDrama?.dramaId || Date.now()}`
-                      }
-                      accept="video/*,.mp4,.m3u8,.webm,.mov,.mkv"
-                      compact={true}
-                      onFileUploaded={(result) => {
-                        if (/\.(mp4|m3u8|webm|mov|mkv)$/i.test(result.fileName) || result.file.type.startsWith("video/")) {
-                          setNewEpisodeForm((prev) => ({ ...prev, url: result.url }));
-                        }
-                      }}
-                    />
-                  </div>
-                )}
               </div>
 
               <div className="flex items-end">

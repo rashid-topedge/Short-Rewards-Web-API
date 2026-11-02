@@ -5,13 +5,34 @@ import type { AdminReelItem, ReelChanges, ReelPermissions } from "@/lib/types";
 export { MODERATOR_APPROVAL_REQUIRED } from "@/lib/moderation";
 
 /**
+ * True if this staff member may edit/publish/delete the reel: the admin any
+ * reel; a moderator their own; a lead moderator also plain moderators' reels
+ * (not the admin's or another lead's).
+ */
+export function canManageReel(session: StaffSession, createdById: string | null | undefined): boolean {
+  return canManageOwned(session, createdById);
+}
+
+/**
+ * Same rule for anything with a creator (reels, dramas): the admin anything;
+ * a moderator what they created; a lead moderator also plain moderators' items.
+ * Items with no recorded creator (e.g. imported dramas) are admin-only.
+ */
+export function canManageOwned(session: StaffSession, createdById: string | null | undefined): boolean {
+  if (session.role === "admin") return true;
+  if (!createdById) return false;
+  if (createdById === session.actorId) return true;
+  return session.lead && createdById.startsWith("mod:") && !session.leadActorIds.includes(createdById);
+}
+
+/**
  * What the signed-in staff member may do with a reel. The API enforces these
  * same rules; the UI only uses them to show the right buttons.
  *
  * Moderators act only on reels they uploaded:
  * - edit title/description/tags/drama/episode and replace video or thumbnail
  * - publish / unpublish it
- * - delete it only if it was never published
+ * - delete it (published or not; files are removed from Backblaze)
  */
 export function reelPermissions(session: StaffSession, reel: AdminReelItem): ReelPermissions {
   if (session.role === "admin") {
@@ -24,7 +45,8 @@ export function reelPermissions(session: StaffSession, reel: AdminReelItem): Ree
       canReview: reel.reviewStatus === "pending" || reel.pendingChanges !== null,
     };
   }
-  const own = reel.createdById === session.actorId;
+  // Own reel, or (lead moderator) a plain moderator's reel.
+  const own = canManageReel(session, reel.createdById);
   // APPROVAL FLOW (disabled): with approvals on, moderators couldn't publish
   // and instead submitted drafts for review:
   // return {
@@ -37,7 +59,9 @@ export function reelPermissions(session: StaffSession, reel: AdminReelItem): Ree
   // };
   return {
     canEdit: own,
-    canDelete: own && !reel.isPublished && !reel.firstPublishedAt,
+    // Previous rule (only never-published reels):
+    // canDelete: own && !reel.isPublished && !reel.firstPublishedAt,
+    canDelete: own,
     canTogglePublish: own,
     canUnpublish: own && reel.isPublished,
     canSubmit: false,
@@ -74,9 +98,10 @@ export function actorOf(session: StaffSession) {
 }
 
 /**
- * Upload routes: admins may upload anywhere; moderators only to the reels
- * folder (never dramas or payout receipts).
+ * Upload routes: admins may upload anywhere; moderators to the reels and
+ * dramas folders (never payout receipts). Nothing is ever overwritten: every
+ * upload gets a free file name.
  */
 export function canUploadTo(session: StaffSession, folderType: string | null | undefined): boolean {
-  return session.role === "admin" || folderType === "reels";
+  return session.role === "admin" || folderType === "reels" || folderType === "dramas";
 }

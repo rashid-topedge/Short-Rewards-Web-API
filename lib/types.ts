@@ -7,6 +7,11 @@ export type DramaCard = {
   episodeCount: number;
   latestEpisodeLabel: string | null;
   isPublished?: boolean;
+  /** Admin list only: who created it ("admin" / "mod:<id>"; null for imported dramas). */
+  createdById?: string | null;
+  createdByName?: string | null;
+  /** Admin list only: what the signed-in staff member may do with it. */
+  permissions?: { canEdit: boolean; canDelete: boolean };
 };
 
 export type DramaListResponse = {
@@ -56,6 +61,8 @@ export type ReelItem = {
   isPublished: boolean;
   createdAt: number;
   updatedAt: number;
+  /** Set when this reel is one part of a longer video (e.g. part 2 of 3). */
+  part?: { group: string; number: number; count: number };
 };
 
 /** Fields a moderator may change on a reel (also the shape of pending changes). */
@@ -109,6 +116,8 @@ export type StaffAccountInfo = {
   id: number;
   username: string;
   displayName: string;
+  /** Lead moderator: can manage plain moderators and their reels, and the Rewards page. */
+  lead: boolean;
   disabled: boolean;
   createdAt: number;
   lastLoginAt: number | null;

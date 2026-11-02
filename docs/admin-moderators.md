@@ -1,20 +1,38 @@
 # Admin console: moderators
 
-The console has two roles.
+The console has three roles.
 
-| | Admin | Moderator |
-|---|---|---|
-| Sign-in | Admin account stored in the database; changed on **My Account** | Account created on **Team** |
-| Pages | Everything | **Reels** and **Rewards** (other pages redirect to Reels) |
-| Upload reels | Publish now or save as draft | Publish now or save as draft (no approval needed) |
-| Edit reels | Any reel | Only reels they uploaded |
-| Edit a live reel | Applies immediately | Applies immediately (own reels) |
-| Replace video / thumbnail | Yes | Yes (own reels) |
-| Publish / unpublish | Any reel | Own reels |
-| Delete | Any reel | Own reels that were **never published** |
-| Coin rewards (Rewards page) | Yes | Yes (every change is in the Activity log under their name) |
-| Approve / reject | Yes (**Waiting for approval** tab) | No (approval is currently off) |
-| Dramas, users, payouts, transactions, referrals, settings, team, activity | Yes | No (APIs return 401) |
+| | Admin | Lead moderator | Moderator |
+|---|---|---|---|
+| Sign-in | Admin account stored in the database; changed on **My Account** | Account created on **Team** | Account created on **Team** |
+| Pages | Everything | **Dramas**, **Reels**, **Rewards**, **Team** | **Dramas** and **Reels** (other pages redirect to Reels) |
+| Create dramas | Yes | Yes | Yes |
+| Edit / publish / delete dramas, add / remove / upload episodes | Any drama | Own dramas + plain moderators' dramas | Own dramas only |
+| Dramas with no creator (imported/older) | Yes | No (view only) | No (view only) |
+| Bulk drama actions, "Publish All with Episodes", play/like counts | Yes | No | No |
+| Upload reels | Publish now or save as draft | Same | Same (no approval needed) |
+| Edit, replace video/thumbnail, publish/unpublish | Any reel | Own reels + plain moderators' reels | Own reels |
+| Delete reels | Any reel | Own reels + plain moderators' reels | Own reels (published or not) |
+| Admin's or another lead's reels | Yes | No | No |
+| Coin rewards (Rewards page) | Yes | Yes (logged under their name) | No |
+| Add moderators, rename, reset password, disable, remove | Yes, anyone | Plain moderators only | No |
+| Make / remove lead moderator | Yes | No | No |
+| Approve / reject | Yes (**Waiting for approval** tab) | No (approval is currently off) | No |
+| Dramas, users, payouts, transactions, referrals, settings, activity | Yes | No | No |
+
+## Dramas
+
+- Every staff member sees all dramas; the ones they can't change show **View only**. **Mine** filters to their own.
+- When a moderator deletes their drama, its episodes and files are deleted. Linked reels they may manage are deleted too; other people's linked reels (e.g. yours) are only unlinked and stay.
+- Every drama, episode upload, replace and delete is in the Activity log (with "created by …" when a lead changes someone else's drama).
+
+## Lead moderators
+
+- **Make someone a lead:** Team → shield button on their row (or tick **Lead moderator** when adding them). Remove it with the same button.
+- Takes effect within about 15 seconds, without signing them out. Removing lead closes Rewards and Team for them right away.
+- A lead can't change their own account or another lead's on the Team page, and can't create leads.
+- When a lead edits or deletes another moderator's reel, the Activity log says so, e.g. `Deleted "Ep 4 clip" (uploaded by Sara)`.
+- Stored as `admin_users.is_lead` (schema v13).
 
 ## Review flow (currently off)
 

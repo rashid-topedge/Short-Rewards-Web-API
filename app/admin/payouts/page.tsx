@@ -238,7 +238,7 @@ export default function AdminPayoutsPage() {
     .reduce((sum, r) => sum + r.pkrAmount, 0);
 
   return (
-    <div className="p-6 md:p-8 max-w-7xl mx-auto w-full space-y-6">
+    <div className="w-full space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-black text-white flex items-center gap-2.5">

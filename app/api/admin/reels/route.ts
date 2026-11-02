@@ -63,6 +63,18 @@ export async function GET(req: NextRequest) {
   });
 }
 
+/** `{ group, number, count }` for one part of a video split into several reels. */
+function readPart(raw: unknown): { group: string; number: number; count: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as { group?: unknown; number?: unknown; count?: unknown };
+  const group = typeof p.group === "string" ? p.group : "";
+  const number = Number(p.number);
+  const count = Number(p.count);
+  if (!/^[A-Za-z0-9_-]{6,64}$/.test(group)) return null;
+  if (!Number.isInteger(number) || !Number.isInteger(count) || number < 1 || count < 2 || number > count || count > 50) return null;
+  return { group, number, count };
+}
+
 /**
  * POST /api/admin/reels
  * Admin: creates the reel, published or not (`isPublished`).
@@ -110,6 +122,7 @@ export async function POST(req: NextRequest) {
       isPublished: Boolean(body.isPublished),
       reviewStatus: null,
       createdBy: { id: session.actorId, name: session.displayName },
+      part: readPart(body?.part),
     });
 
     await logActivity(actorOf(session), {

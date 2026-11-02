@@ -22,10 +22,25 @@ import {
   uploadFileChunked,
   UploadAbortedError,
 } from "@/lib/chunkUpload";
+import { Mp4SplitUnsupported, splitVideo } from "@/lib/mp4Split";
 
 const MAX_FILES = 200;
 const PARALLEL_UPLOADS = 2;
 const VIDEO_ACCEPT = "video/mp4,video/webm,video/quicktime,video/x-matroska,.mp4,.webm,.mov,.mkv";
+/** Videos longer than this are split into parts of about this length. */
+const PART_SECONDS = 180;
+/** A last part shorter than this is merged into the previous part. */
+const MIN_LAST_PART_SECONDS = 30;
+
+function isSplittableType(f: File): boolean {
+  return /\.(mp4|m4v|mov)$/i.test(f.name) || f.type === "video/mp4" || f.type === "video/quicktime";
+}
+
+function randomGroupId(): string {
+  const bytes = new Uint8Array(9);
+  crypto.getRandomValues(bytes);
+  return "pg_" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 type UploadState =
   | { status: "queued" }
@@ -60,6 +75,12 @@ type ReelDraft = {
   drama: DramaRef | null;
   episodeNumber: string;
   isPublished: boolean;
+  /** Set when this draft is one part of a longer video that was split. */
+  part: { group: string; number: number; count: number } | null;
+  /** Name of the original file, for split parts. */
+  sourceName: string | null;
+  /** Shown on the card (e.g. "couldn't split this format"). */
+  note: string | null;
 };
 
 type Props = {
@@ -90,6 +111,8 @@ export default function ReelUploadDialog({ open, onClose, onSaved, moderator = f
   const [batchDescription, setBatchDescription] = useState("");
   const [batchDrama, setBatchDrama] = useState<DramaRef | null>(null);
   const [batchPublished, setBatchPublished] = useState(true);
+  const [splitLong, setSplitLong] = useState(true);
+  const [preparing, setPreparing] = useState(0);
 
   itemsRef.current = items;
 
@@ -153,7 +176,7 @@ export default function ReelUploadDialog({ open, onClose, onSaved, moderator = f
     setRejected(bad);
     if (accepted.length === 0) return;
 
-    const drafts: ReelDraft[] = accepted.map((file) => ({
+    const makeDraft = (file: File, extra: Partial<ReelDraft> = {}): ReelDraft => ({
       key: `reel-${++keySeq}`,
       file,
       upload: { status: "queued" },
@@ -170,9 +193,64 @@ export default function ReelUploadDialog({ open, onClose, onSaved, moderator = f
       drama: batchDrama,
       episodeNumber: "",
       isPublished: batchPublished,
-    }));
+      part: null,
+      sourceName: null,
+      note: null,
+      ...extra,
+    });
+
+    // Long MP4/MOV videos are cut into ~3-minute parts here in the browser
+    // (at keyframes, no re-encoding); each part becomes its own linked reel.
+    const drafts: ReelDraft[] = [];
+    let splitCount = 0;
+    const toSplit = splitLong ? accepted.filter(isSplittableType).length : 0;
+    if (toSplit) setPreparing((n) => n + toSplit);
+    for (const file of accepted) {
+      if (!splitLong || !isSplittableType(file)) {
+        drafts.push(makeDraft(file));
+        continue;
+      }
+      try {
+        const parts = await splitVideo(file, PART_SECONDS, MIN_LAST_PART_SECONDS);
+        if (parts.length <= 1) {
+          drafts.push(makeDraft(file, { durationSeconds: parts[0]?.durationSeconds ?? null }));
+        } else {
+          const room = MAX_FILES - itemsRef.current.length - drafts.length;
+          if (parts.length > room) {
+            bad.push(`${file.name}: would make ${parts.length} parts, but only ${Math.max(room, 0)} more videos fit in this batch`);
+          } else {
+            const group = randomGroupId();
+            const base = file.name.replace(/\.[^.]+$/, "");
+            const title = titleFromFileName(file.name);
+            for (const p of parts) {
+              const n = p.index + 1;
+              drafts.push(
+                makeDraft(new File([p.blob], `${base}_part${n}.mp4`, { type: "video/mp4" }), {
+                  title: `${title} (Part ${n}/${p.count})`,
+                  durationSeconds: Math.round(p.durationSeconds),
+                  part: { group, number: n, count: p.count },
+                  sourceName: file.name,
+                })
+              );
+            }
+            splitCount++;
+          }
+        }
+      } catch (err) {
+        const why = err instanceof Mp4SplitUnsupported ? err.message : "the file couldn't be read for splitting";
+        drafts.push(makeDraft(file, { note: `Not split (${why}). It will upload as one reel.` }));
+      } finally {
+        setPreparing((n) => Math.max(0, n - 1));
+      }
+    }
+    if (bad.length) setRejected([...bad]);
+    if (drafts.length === 0) return;
     setItems((prev) => [...prev, ...drafts]);
-    announce(`${drafts.length} video${drafts.length === 1 ? "" : "s"} added. Uploading started.`);
+    announce(
+      `${drafts.length} video${drafts.length === 1 ? "" : "s"} added${
+        splitCount ? ` (${splitCount} long video${splitCount === 1 ? "" : "s"} split into parts)` : ""
+      }. Uploading started.`
+    );
 
     // Read duration and grab a poster frame locally, one at a time.
     for (const d of drafts) {
@@ -180,8 +258,13 @@ export default function ReelUploadDialog({ open, onClose, onSaved, moderator = f
       const still = itemsRef.current.find((x) => x.key === d.key);
       if (!still) continue;
       patch(d.key, (cur) => ({
-        durationSeconds: info.durationSeconds,
+        durationSeconds: info.durationSeconds ?? cur.durationSeconds,
         inspected: true,
+        note:
+          cur.note ??
+          (splitLong && !cur.part && (info.durationSeconds ?? 0) > PART_SECONDS + MIN_LAST_PART_SECONDS
+            ? "Longer than 3 minutes, but only MP4/MOV files can be split. It will upload as one reel."
+            : null),
         posterBlob: info.poster,
         thumbPreview: cur.customThumb ? cur.thumbPreview : info.poster ? URL.createObjectURL(info.poster) : null,
       }));
@@ -267,6 +350,7 @@ export default function ReelUploadDialog({ open, onClose, onSaved, moderator = f
               .map((t) => t.trim())
               .filter(Boolean),
             isPublished: d.isPublished,
+            part: d.part,
           }),
         });
         const data = (await res.json().catch(() => ({}))) as { reelId?: number; error?: string };
@@ -438,6 +522,26 @@ export default function ReelUploadDialog({ open, onClose, onSaved, moderator = f
               </button>
             </p>
             <p className="mt-1 text-xs text-neutral-400">MP4, WebM, MOV or MKV · up to {MAX_FILES} videos at a time</p>
+            <label className="mx-auto mt-3 inline-flex cursor-pointer items-center gap-2 text-left text-sm text-neutral-200">
+              <input
+                type="checkbox"
+                checked={splitLong}
+                onChange={(e) => setSplitLong(e.target.checked)}
+                className="h-4 w-4 rounded border-[#2b3850] accent-purple-500"
+              />
+              <span>
+                Split videos longer than 3 minutes into 3-minute parts
+                <span className="block text-xs text-neutral-400">
+                  Each part becomes its own reel, titled &ldquo;(Part 1/3)&rdquo; and linked to the others. MP4/MOV only.
+                </span>
+              </span>
+            </label>
+            {preparing > 0 && (
+              <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-purple-200" role="status">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                Preparing {preparing} video{preparing === 1 ? "" : "s"}…
+              </p>
+            )}
             <input
               ref={fileInputRef}
               type="file"
@@ -649,13 +753,27 @@ function ReelDraftCard({
               {d.file.name}
               <br />
               {formatBytes(d.file.size)}
+              {d.sourceName && (
+                <>
+                  <br />
+                  <span title={d.sourceName}>from {d.sourceName}</span>
+                </>
+              )}
             </p>
+            {d.part && (
+              <span className="inline-block rounded-md bg-purple-500/20 px-1.5 py-0.5 text-xs font-semibold text-purple-200">
+                Part {d.part.number} of {d.part.count}
+              </span>
+            )}
           </div>
         </div>
 
         {/* Fields */}
         <div className="min-w-0 space-y-3">
           <UploadStatus draft={d} progress={progress} onRetry={onRetry} />
+          {d.note && (
+            <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">{d.note}</p>
+          )}
 
           <fieldset disabled={locked} className="space-y-3 disabled:opacity-70">
             <legend className="sr-only">Details for {d.file.name}</legend>

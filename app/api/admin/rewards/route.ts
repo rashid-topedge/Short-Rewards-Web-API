@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireStaff } from "@/lib/auth";
+import { isAdminOrLead, requireStaff } from "@/lib/auth";
 import { getRewardConfig, logActivity, saveRewardConfig } from "@/lib/db";
 import { DEFAULT_REWARD_CONFIG, parseRewardConfig, type RewardConfig } from "@/lib/rewardConfig";
 import { actorOf } from "@/lib/reelPermissions";
 
-/** GET /api/admin/rewards: current reward config + defaults (admins and moderators). */
+const NOT_ALLOWED = () =>
+  NextResponse.json({ error: "Only the admin and lead moderators can see reward settings.", code: "NOT_ALLOWED" }, { status: 403 });
+
+/** GET /api/admin/rewards: current reward config + defaults (admin and lead moderators). */
 export async function GET(req: NextRequest) {
   const auth = await requireStaff(req);
   if (!auth.ok) return auth.response;
+  if (!isAdminOrLead(auth.session)) return NOT_ALLOWED();
   return NextResponse.json({ config: await getRewardConfig(), defaults: DEFAULT_REWARD_CONFIG });
 }
 
@@ -28,12 +32,13 @@ function describeChanges(before: RewardConfig, after: RewardConfig): string[] {
 }
 
 /**
- * PUT /api/admin/rewards { config }: replaces the reward config (admins and
- * moderators). Live on every server within 30 s; logged with who changed what.
+ * PUT /api/admin/rewards { config }: replaces the reward config (admin and
+ * lead moderators). Live on every server within 30 s; logged with who changed what.
  */
 export async function PUT(req: NextRequest) {
   const auth = await requireStaff(req);
   if (!auth.ok) return auth.response;
+  if (!isAdminOrLead(auth.session)) return NOT_ALLOWED();
   const { session } = auth;
 
   const body = await req.json().catch(() => ({}));

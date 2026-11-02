@@ -1,18 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { COOKIE_NAME, readStaffToken } from "@/lib/adminToken";
 import { getSessionSecret } from "@/lib/adminSecret";
+import { getStaffSession, isAdminOrLead } from "@/lib/auth";
 
 /**
  * Admin console page routing (pages only; every API checks the session itself).
  * - No valid session → /admin/login
- * - Moderators → only Reels and Rewards; anything else sends them to Reels.
+ * - Moderators → only Reels and Dramas; lead moderators also Rewards and Team. Anything
+ *   else sends them to Reels.
  *
  * This checks the token signature (secret from the database, cached). Disabled
  * moderators and changed passwords are caught by the console layout and the
  * APIs, which also check the account.
  */
 /** Console pages moderators may open. */
-const MODERATOR_PAGES = ["/admin/reels", "/admin/rewards"];
+const MODERATOR_PAGES = ["/admin/reels", "/admin/dramas"];
+/** Extra pages for lead moderators. */
+const LEAD_PAGES = ["/admin/rewards", "/admin/team"];
+
+const under = (pathname: string, pages: string[]) => pages.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -29,9 +35,11 @@ export async function proxy(request: NextRequest) {
   if (!session) {
     return NextResponse.redirect(new URL("/admin/login", request.url));
   }
-  const moderatorAllowed = MODERATOR_PAGES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
-  if (session.role === "moderator" && !moderatorAllowed) {
-    return NextResponse.redirect(new URL("/admin/reels", request.url));
+  if (session.role === "moderator" && !under(pathname, MODERATOR_PAGES)) {
+    // Lead status lives in the database (not the token), so check the account
+    // for the lead-only pages (cached for a few seconds).
+    const allowed = under(pathname, LEAD_PAGES) && isAdminOrLead(await getStaffSession(request).catch(() => null));
+    if (!allowed) return NextResponse.redirect(new URL("/admin/reels", request.url));
   }
   return NextResponse.next();
 }
