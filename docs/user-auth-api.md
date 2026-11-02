@@ -221,3 +221,23 @@ field linking it to the others:
   ```
 - A part can be unpublished or deleted on its own, so `items` can have gaps (e.g. parts 1 and 3).
   Use `part.number` for labels and the list order for "next".
+
+## Dramas and episodes
+
+All dramas and episodes are now your own uploads (no scraped data). Covers, videos and
+thumbnails are in a private bucket, so every link in these responses is **signed**: use it as
+given, don't build URLs yourself, and don't keep links longer than a day (fetch again instead).
+
+```
+GET /api/dramas?limit=24[&q=…][&cursor=…]     → { items: [ { dramaId, slug, title, cover, playCount,
+                                                  episodeCount, latestEpisodeLabel } ], nextCursor }
+GET /api/dramas/{dramaId}                     → { dramaId, slug, title, cover, synopsis, tags, playCount,
+                                                  likeCount, episodeCount, latestEpisodeLabel }
+GET /api/dramas/{dramaId}/episodes            → { dramaId, episodes: [ { ep, title, playUrl, thumbnailUrl,
+                                                  durationSeconds, isPublished } ] }
+```
+- Only published dramas, and only published episodes, are returned.
+- New per-episode fields: `title` (may be null: show "Episode {ep}"), `thumbnailUrl` (may be null),
+  `durationSeconds` (may be null).
+- Drama IDs of new dramas never reuse old ones, so episode rewards
+  (`POST /api/user/reward/episode {dramaId, ep}`) keep working as before.

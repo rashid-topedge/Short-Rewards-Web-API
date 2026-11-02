@@ -7,7 +7,14 @@ import {
   listReferencedMediaUrls,
   type MediaFolder,
 } from "@/lib/db";
-import { b2DeleteFile, b2FileNameFromUrl, b2ListFiles, getB2ConfigForFolder, resolveOwnedFileName } from "@/lib/b2";
+import {
+  b2DeleteFile,
+  b2FileNameFromUrl,
+  b2ListFiles,
+  describeB2Error,
+  getB2ConfigForFolder,
+  resolveOwnedFileName,
+} from "@/lib/b2";
 
 /**
  * Background removal of Backblaze files that no reel / episode / drama uses any
@@ -46,7 +53,7 @@ export async function processB2DeleteQueue(
       await completeB2Delete(job.id);
     } catch (err) {
       stats.failed++;
-      await failB2Delete(job.id, job.attempts, err instanceof Error ? err.message : String(err)).catch(() => {});
+      await failB2Delete(job.id, job.attempts, describeB2Error(err)).catch(() => {});
     }
   }
   if (jobs.length === limit) stats.remaining = true;
@@ -61,6 +68,8 @@ export type OrphanScanResult = {
     orphanCount: number;
     orphanBytes: number;
     sample: string[];
+    /** Set when this bucket couldn't be listed (the other folders are still scanned). */
+    error?: string;
   }[];
   orphanFileNames: Record<MediaFolder, string[]>;
 };
@@ -84,7 +93,15 @@ export async function scanOrphanedFiles(minAgeHours = 24): Promise<OrphanScanRes
     const config = await getB2ConfigForFolder(folderType);
     if (!config) continue;
     const prefix = `${folderType}/`;
-    const files = await b2ListFiles(folderType, prefix);
+    let files: Awaited<ReturnType<typeof b2ListFiles>>;
+    try {
+      files = await b2ListFiles(folderType, prefix);
+    } catch (err) {
+      const error = describeB2Error(err);
+      console.error(`Storage scan of ${prefix} failed:`, error);
+      result.folders.push({ folderType, prefix, scanned: 0, orphanCount: 0, orphanBytes: 0, sample: [], error });
+      continue;
+    }
     const orphans = files.filter((f) => {
       if (f.uploadedAt > cutoff) return false;
       if (used.has(`name:${f.fileName}`)) return false;

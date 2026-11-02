@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, RotateCcw, Trash2, UploadCloud, X } from "lucide-react";
-import { cancelChunkSession, formatBytes, uploadFileChunked, UploadAbortedError } from "@/lib/chunkUpload";
+import { cancelChunkSession, formatBytes, inspectVideo, uploadFileChunked, UploadAbortedError } from "@/lib/chunkUpload";
 import type { EpisodeItem } from "@/lib/types";
 
 const PARALLEL_UPLOADS = 2;
@@ -32,6 +32,14 @@ type Draft = {
   /** How the number was chosen, shown under the field. */
   epSource: "name" | "next";
   replace: boolean;
+  /** Optional episode title. */
+  title: string;
+  published: boolean;
+  /** Length and a poster frame, read from the video in the browser. */
+  inspected: boolean;
+  durationSeconds: number | null;
+  poster: Blob | null;
+  posterPreview: string | null;
   sessionId?: string;
   upload:
     | { status: "queued" }
@@ -85,7 +93,7 @@ export default function EpisodeUploadDialog({
   }, []);
 
   // ---- adding files
-  const addFiles = (list: FileList | File[] | null) => {
+  const addFiles = async (list: FileList | File[] | null) => {
     if (!list) return;
     const bad: string[] = [];
     const accepted: File[] = [];
@@ -121,6 +129,12 @@ export default function EpisodeUploadDialog({
         ep: String(ep),
         epSource,
         replace: false,
+        title: "",
+        published: publish,
+        inspected: false,
+        durationSeconds: null,
+        poster: null,
+        posterPreview: null,
         upload: { status: "queued" },
         save: { status: "idle" },
         saveRequested: false,
@@ -128,6 +142,18 @@ export default function EpisodeUploadDialog({
     });
     setItems((prev) => [...prev, ...drafts].sort((a, b) => Number(a.ep) - Number(b.ep)));
     setAnnouncement(`${drafts.length} file${drafts.length === 1 ? "" : "s"} added. Uploading started.`);
+
+    // Read each video's length and grab a thumbnail frame, one at a time (like reels).
+    for (const d of drafts) {
+      const info = await inspectVideo(d.file).catch(() => ({ durationSeconds: null, poster: null }));
+      if (!itemsRef.current.some((x) => x.key === d.key)) continue;
+      patch(d.key, {
+        inspected: true,
+        durationSeconds: info.durationSeconds,
+        poster: info.poster,
+        posterPreview: info.poster ? URL.createObjectURL(info.poster) : null,
+      });
+    }
   };
 
   // ---- upload queue
@@ -179,10 +205,25 @@ export default function EpisodeUploadDialog({
       if (!d || d.upload.status !== "uploaded" || d.save.status === "saving" || d.save.status === "saved") return;
       patch(key, { save: { status: "saving" }, saveRequested: false });
       try {
+        // The thumbnail goes next to the video, in the drama's own folder.
+        let thumbnailUrl: string | null = null;
+        if (d.poster) {
+          const stem = d.file.name.replace(/\.[^.]+$/, "") || `EP-${d.ep}`;
+          const posterFile = new File([d.poster], `${stem}.jpg`, { type: "image/jpeg" });
+          thumbnailUrl = (await uploadFileChunked(posterFile, { folderType: "dramas", dramaId: drama.dramaId })).url;
+        }
         const res = await fetch(`/api/admin/dramas/${drama.dramaId}/episodes`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ep: Number(d.ep), url: d.upload.url, isPublished: publish, ifNew: !d.replace }),
+          body: JSON.stringify({
+            ep: Number(d.ep),
+            url: d.upload.url,
+            title: d.title.trim() || null,
+            thumbnailUrl,
+            durationSeconds: d.durationSeconds,
+            isPublished: d.published,
+            ifNew: !d.replace,
+          }),
         });
         const data = (await res.json().catch(() => ({}))) as { episodes?: EpisodeItem[]; error?: string };
         if (!res.ok) throw new Error(data.error || "Could not save the episode");
@@ -193,12 +234,12 @@ export default function EpisodeUploadDialog({
         patch(key, { save: { status: "error", error: err instanceof Error ? err.message : String(err) } });
       }
     },
-    [drama.dramaId, onSaved, patch, publish]
+    [drama.dramaId, onSaved, patch]
   );
 
   // Save files whose upload finished after "Save all" was clicked.
   useEffect(() => {
-    items.filter((d) => d.saveRequested && d.upload.status === "uploaded").forEach((d) => void saveOne(d.key));
+    items.filter((d) => d.saveRequested && d.inspected && d.upload.status === "uploaded").forEach((d) => void saveOne(d.key));
   }, [items, saveOne]);
 
   const unsaved = items.filter((d) => d.save.status !== "saved");
@@ -277,7 +318,7 @@ export default function EpisodeUploadDialog({
             onDrop={(e) => {
               e.preventDefault();
               setDragOver(false);
-              addFiles(e.dataTransfer.files);
+              void addFiles(e.dataTransfer.files);
             }}
             className={`rounded-2xl border-2 border-dashed px-4 text-center transition ${items.length ? "py-4" : "py-10"} ${
               dragOver ? "border-rose-400 bg-rose-500/10" : "border-[#2b3850] bg-[#111827]"
@@ -306,7 +347,7 @@ export default function EpisodeUploadDialog({
               tabIndex={-1}
               aria-hidden="true"
               onChange={(e) => {
-                addFiles(e.target.files);
+                void addFiles(e.target.files);
                 e.target.value = "";
               }}
             />
@@ -325,8 +366,18 @@ export default function EpisodeUploadDialog({
 
           {items.length > 0 && (
             <label className="flex cursor-pointer items-center gap-2 text-sm text-neutral-200">
-              <input type="checkbox" checked={publish} onChange={(e) => setPublish(e.target.checked)} className="h-4 w-4 accent-rose-500" />
-              Publish the episodes when saved
+              <input
+                type="checkbox"
+                checked={publish}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setPublish(on);
+                  // Applies to every file not saved yet; each can still be changed below.
+                  setItems((prev) => prev.map((d) => (d.save.status === "saved" ? d : { ...d, published: on })));
+                }}
+                className="h-4 w-4 accent-rose-500"
+              />
+              Publish all when saved <span className="text-neutral-400">(or set each episode below)</span>
             </label>
           )}
 
@@ -340,7 +391,7 @@ export default function EpisodeUploadDialog({
                 return (
                   <li
                     key={d.key}
-                    className={`grid grid-cols-[88px_1fr_auto] items-start gap-3 rounded-xl border bg-[#111827] p-3 ${
+                    className={`grid grid-cols-[112px_1fr_auto] items-start gap-3 rounded-xl border bg-[#111827] p-3 ${
                       d.save.status === "saved"
                         ? "border-emerald-500/50"
                         : problem || d.upload.status === "failed" || d.save.status === "error"
@@ -364,6 +415,19 @@ export default function EpisodeUploadDialog({
                         aria-describedby={problem ? `${d.key}-problem` : undefined}
                         className="mt-1 h-10 w-full rounded-lg border border-[#2b3850] bg-[#161c28] px-2 font-mono text-sm text-white focus:border-rose-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60 disabled:opacity-60"
                       />
+                      <div className="mt-2 aspect-video w-full overflow-hidden rounded-md bg-[#0b1019]">
+                        {d.posterPreview ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={d.posterPreview} alt={`Thumbnail for episode ${d.ep}`} className="h-full w-full object-cover" />
+                        ) : !d.inspected ? (
+                          <div className="flex h-full items-center justify-center" role="status">
+                            <Loader2 className="h-4 w-4 animate-spin text-neutral-500" aria-hidden="true" />
+                            <span className="sr-only">Reading video</span>
+                          </div>
+                        ) : (
+                          <p className="flex h-full items-center justify-center px-1 text-center text-[10px] text-neutral-500">No thumbnail</p>
+                        )}
+                      </div>
                     </div>
 
                     <div className="min-w-0 space-y-1.5">
@@ -372,8 +436,33 @@ export default function EpisodeUploadDialog({
                       </p>
                       <p className="text-xs text-neutral-400">
                         {formatBytes(d.file.size)}
+                        {d.durationSeconds ? ` · ${formatLength(d.durationSeconds)}` : ""}
                         {d.epSource === "next" && d.save.status !== "saved" && " · no number in the name, next free number used"}
                       </p>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <label htmlFor={`${d.key}-title`} className="sr-only">
+                          Title for episode {d.ep} (optional)
+                        </label>
+                        <input
+                          id={`${d.key}-title`}
+                          value={d.title}
+                          disabled={locked}
+                          maxLength={120}
+                          onChange={(e) => patch(d.key, { title: e.target.value })}
+                          placeholder="Episode title (optional)"
+                          className="h-9 min-w-0 flex-1 rounded-lg border border-[#2b3850] bg-[#161c28] px-2.5 text-sm text-white placeholder:text-neutral-500 focus:border-rose-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60 disabled:opacity-60"
+                        />
+                        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-neutral-200">
+                          <input
+                            type="checkbox"
+                            checked={d.published}
+                            disabled={locked}
+                            onChange={(e) => patch(d.key, { published: e.target.checked })}
+                            className="h-3.5 w-3.5 accent-rose-500"
+                          />
+                          Published
+                        </label>
+                      </div>
                       <Status d={d} onRetry={() => patch(d.key, { upload: { status: "queued" } })} />
                       {problem && (
                         <p id={`${d.key}-problem`} className="flex items-center gap-1.5 text-xs text-rose-200">
@@ -439,6 +528,15 @@ export default function EpisodeUploadDialog({
       </div>
     </dialog>
   );
+}
+
+/** 95 → "1:35". */
+function formatLength(seconds: number): string {
+  const s = Math.round(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rest = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${rest}` : `${m}:${rest}`;
 }
 
 function Status({ d, onRetry }: { d: Draft; onRetry: () => void }) {

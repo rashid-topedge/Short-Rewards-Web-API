@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import FileUploadManager from "@/components/admin/FileUploadManager";
 import EpisodeUploadDialog from "@/components/admin/EpisodeUploadDialog";
+import EpisodeList from "@/components/admin/EpisodeList";
 import { useCursorPager } from "@/components/admin/useCursorPager";
 import type { DramaCard, EpisodeItem } from "@/lib/types";
 
@@ -87,6 +88,8 @@ export default function AdminDramasPage() {
   // New drama: random part of its bucket folder name, and the folder its cover went to.
   const [folderSuffix, setFolderSuffix] = useState("");
   const [coverFolder, setCoverFolder] = useState<string | null>(null);
+  // What the cover picture looks like (a signed link, or the file just uploaded).
+  const [coverPreview, setCoverPreview] = useState<string | null>(null);
 
   // Episode Manager Modal
   const [isEpisodeModalOpen, setIsEpisodeModalOpen] = useState(false);
@@ -293,6 +296,7 @@ export default function AdminDramasPage() {
     setEditingDrama(null);
     setDramaError("");
     setCoverFolder(null);
+    setCoverPreview(null);
     setFolderSuffix(Math.random().toString(36).slice(2, 8).padEnd(6, "0"));
     setDramaForm({
       title: "",
@@ -309,10 +313,12 @@ export default function AdminDramasPage() {
   const openEditDramaModal = async (drama: DramaCard) => {
     setEditingDrama(drama);
     setDramaError("");
+    setCoverPreview(drama.previewCover ?? null);
     try {
       const res = await fetch(`/api/admin/dramas/${drama.dramaId}`);
       if (res.ok) {
         const detail = await res.json();
+        if (detail.previewCover) setCoverPreview(detail.previewCover);
         setDramaForm({
           title: detail.title || "",
           cover: detail.cover || "",
@@ -440,21 +446,6 @@ export default function AdminDramasPage() {
       }
     } catch (err) {
       console.error("Failed to add episode", err);
-    }
-  };
-
-  const handleDeleteEpisode = async (ep: number) => {
-    if (!currentDrama || !confirm(`Delete Episode ${ep}?`)) return;
-    try {
-      const res = await fetch(`/api/admin/dramas/${currentDrama.dramaId}/episodes/${ep}`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setEpisodes(data.episodes || []);
-      }
-    } catch (err) {
-      console.error("Failed to delete episode", err);
     }
   };
 
@@ -661,9 +652,9 @@ export default function AdminDramasPage() {
               >
                 {/* Poster Box */}
                 <div className="relative aspect-[3/4] bg-[#161c28] overflow-hidden">
-                  {drama.cover ? (
+                  {drama.previewCover || drama.cover ? (
                     <Image
-                      src={drama.cover}
+                      src={(drama.previewCover || drama.cover)!}
                       alt={drama.title || "Drama Cover"}
                       fill
                       unoptimized
@@ -848,7 +839,10 @@ export default function AdminDramasPage() {
                   <input
                     type="url"
                     value={dramaForm.cover}
-                    onChange={(e) => setDramaForm({ ...dramaForm, cover: e.target.value })}
+                    onChange={(e) => {
+                      setDramaForm({ ...dramaForm, cover: e.target.value });
+                      setCoverPreview(e.target.value || null);
+                    }}
                     placeholder="https://images.unsplash.com/... or upload to B2"
                     className="flex-1 bg-[#161c28] border border-[#222c3f] rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-rose-500"
                   />
@@ -861,6 +855,16 @@ export default function AdminDramasPage() {
                     Upload File / Folder
                   </button>
                 </div>
+
+                {coverPreview && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={coverPreview}
+                    alt="Cover preview"
+                    className="h-40 w-auto rounded-xl border border-[#222c3f] object-cover"
+                    onError={() => setCoverPreview(null)}
+                  />
+                )}
 
                 {showCoverUploader && (
                   <div className="p-3.5 rounded-2xl bg-[#0f1422] border border-[#1f2a40] space-y-3">
@@ -875,6 +879,7 @@ export default function AdminDramasPage() {
                       onFileUploaded={(result) => {
                         if (/\.(jpg|jpeg|png|webp|gif|svg)$/i.test(result.fileName) || result.file.type.startsWith("image/")) {
                           setDramaForm((prev) => ({ ...prev, cover: result.url }));
+                          setCoverPreview(URL.createObjectURL(result.file));
                           if (!editingDrama) setCoverFolder((prev) => prev || newDramaFolder(dramaForm.title, folderSuffix));
                         }
                       }}
@@ -1048,50 +1053,23 @@ export default function AdminDramasPage() {
             </form>
 
             {/* Episodes List */}
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+            <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
               {loadingEpisodes ? (
                 <div className="py-8 text-center text-xs text-neutral-500 flex items-center justify-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin text-rose-500" /> Loading episodes...
                 </div>
-              ) : episodes.length === 0 ? (
-                <p className="text-xs text-neutral-500 py-6 text-center">No episodes added yet.</p>
               ) : (
-                episodes.map((ep) => (
-                  <div
-                    key={ep.ep}
-                    className="flex items-center justify-between p-3 rounded-xl bg-[#161c28] border border-[#222c3f] text-xs"
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="font-extrabold text-white bg-rose-600/20 text-rose-400 px-2 py-0.5 rounded font-mono">
-                        EP {ep.ep}
-                      </span>
-                      <span className="text-neutral-400 font-mono text-[11px] truncate max-w-sm">
-                        {ep.playUrl || "No stream URL"}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      {ep.playUrl && (
-                        <button
-                          type="button"
-                          onClick={() => setPreviewStreamUrl(ep.playUrl)}
-                          className="p-1.5 rounded-lg bg-[#222c3f] hover:bg-rose-600 text-slate-200 hover:text-white transition"
-                          title="Preview Stream"
-                        >
-                          <Play className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteEpisode(ep.ep)}
-                        className="p-1.5 rounded-lg bg-[#222c3f] hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 transition"
-                        title="Delete Episode"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))
+                <EpisodeList
+                  dramaId={currentDrama.dramaId}
+                  episodes={episodes}
+                  onPreview={(url) => setPreviewStreamUrl(url)}
+                  onChange={(eps) => {
+                    setEpisodes(eps);
+                    setDramas((prev) =>
+                      prev.map((d) => (d.dramaId === currentDrama.dramaId ? { ...d, episodeCount: eps.length } : d))
+                    );
+                  }}
+                />
               )}
             </div>
           </div>

@@ -66,13 +66,63 @@ export async function getB2ConfigForFolder(folderType: FolderType): Promise<B2Co
     return {
       keyId,
       applicationKey,
-      bucketId,
+      // The general S3 settings hold the bucket NAME; B2's own API needs the ID.
+      bucketId: await resolveBucketId(keyId, applicationKey, bucketId),
       publicUrl,
       endpoint,
     };
   }
 
   return null;
+}
+
+/** B2 bucket IDs are 24 hex characters; bucket names can't look like that (no capitals, usually words). */
+function looksLikeBucketId(value: string): boolean {
+  return /^[0-9a-f]{24}$/i.test(value);
+}
+
+// name → ID (or the value itself when the lookup found nothing, retried after 10 minutes)
+const bucketIdByName = new Map<string, { id: string; at: number; found: boolean }>();
+const BUCKET_LOOKUP_RETRY_MS = 10 * 60 * 1000;
+
+/**
+ * Accepts a bucket ID or a bucket name (e.g. from the S3 "Bucket" setting) and
+ * returns the ID. Names are looked up once per server and cached. If the lookup
+ * fails, the value is returned unchanged and the B2 call reports the problem.
+ */
+async function resolveBucketId(keyId: string, applicationKey: string, value: string): Promise<string> {
+  if (looksLikeBucketId(value)) return value;
+  const cacheKey = `${keyId}:${value}`;
+  const cached = bucketIdByName.get(cacheKey);
+  if (cached && (cached.found || Date.now() - cached.at < BUCKET_LOOKUP_RETRY_MS)) return cached.id;
+  try {
+    const { client } = await getB2Client(keyId, applicationKey);
+    // getBucket sends bucketName to b2_list_buckets (listBuckets in this library ignores it),
+    // which also works for keys restricted to that one bucket.
+    const res = await client.getBucket({ bucketName: value });
+    const match = ((res.data?.buckets || []) as B2Bucket[]).find((b) => b.bucketName === value);
+    if (match?.bucketId) {
+      bucketIdByName.set(cacheKey, { id: match.bucketId, at: Date.now(), found: true });
+      return match.bucketId;
+    }
+  } catch (err) {
+    console.error(`Couldn't look up the B2 bucket named "${value}":`, describeB2Error(err));
+  }
+  bucketIdByName.set(cacheKey, { id: value, at: Date.now(), found: false });
+  return value;
+}
+
+/**
+ * A readable message for a failed B2 call. The B2 library only says "Request
+ * failed with status code 400"; Backblaze's own reason is in the response body.
+ */
+export function describeB2Error(err: unknown): string {
+  const e = err as { message?: string; response?: { status?: number; data?: { code?: string; message?: string } } };
+  const data = e?.response?.data;
+  if (data && (data.message || data.code)) {
+    return `Backblaze ${e.response?.status ?? ""} ${data.code ?? ""}: ${data.message ?? ""}`.replace(/\s+/g, " ").trim();
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

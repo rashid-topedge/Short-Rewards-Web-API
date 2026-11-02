@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isAuthenticatedAdmin } from "@/lib/auth";
 import { getB2DeleteQueueStats } from "@/lib/db";
 import { processB2DeleteQueue, queueOrphanedFiles, scanOrphanedFiles } from "@/lib/b2Cleanup";
+import { describeB2Error } from "@/lib/b2";
 
 export const maxDuration = 300;
 
@@ -48,8 +49,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   } catch (err) {
-    console.error("Storage cleanup failed:", err);
-    const message = err instanceof Error ? err.message : String(err);
+    const message = describeB2Error(err);
+    console.error("Storage cleanup failed:", message);
     return NextResponse.json({ error: `Storage cleanup failed: ${message}` }, { status: 500 });
   }
 }

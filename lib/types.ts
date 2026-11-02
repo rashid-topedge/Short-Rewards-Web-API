@@ -12,6 +12,8 @@ export type DramaCard = {
   createdByName?: string | null;
   /** Admin list only: what the signed-in staff member may do with it. */
   permissions?: { canEdit: boolean; canDelete: boolean };
+  /** Admin only: a signed link to the cover, for display (the bucket is private). */
+  previewCover?: string | null;
 };
 
 export type DramaListResponse = {
@@ -36,8 +38,15 @@ export type DramaDetail = {
 
 export type EpisodeItem = {
   ep: number;
+  /** Optional episode title, e.g. "The Wedding". */
+  title: string | null;
   playUrl: string | null;
+  thumbnailUrl: string | null;
+  durationSeconds: number | null;
   isPublished?: boolean;
+  /** Admin only: signed links so private-bucket media shows in the console. */
+  previewUrl?: string | null;
+  previewThumbnailUrl?: string | null;
 };
 
 export type EpisodeListResponse = {

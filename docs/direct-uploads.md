@@ -85,3 +85,18 @@ In **Upload reels**, "Split videos longer than 3 minutes into 3-minute parts" is
 - A new drama's cover, uploaded before the drama is saved, goes to `dramas/<title>-<random>/`, and the drama keeps using that folder.
 - Older files stay where they are; only new uploads use the new folders.
 - **Episodes → Upload episodes** uploads many videos at once (2 in parallel, straight to B2). Numbers come from the file names ("EP 05.mp4", "S01E05", "Drama_5.mp4" → 5; quality tags like "720p" are ignored); files without a number get the next free number. An existing episode is only replaced if you tick "Replace".
+
+## Dramas and episodes (database version 15)
+
+- **Your own content only.** On the first start of this version, the database switches once:
+  - `dramas` is cleaned up in place (it isn't renamed, because reels point at it): dramas with no creator (scraped) are copied to `dramas_scraped` and removed, the unused `raw_json` / `fetched_at` columns are dropped, and dates become milliseconds.
+  - `episodes` is rebuilt, keyed on (drama, episode), with `title`, `thumbnail_url` and `duration_seconds`. The old table is kept as `episodes_scraped`.
+  - Episodes of the remaining dramas are moved across; reels whose drama no longer exists are unlinked (the reels stay).
+  - New drama IDs always go above every ID used before (stored as `drama_id_floor` in `admin_config`).
+  - Drop `dramas_scraped` and `episodes_scraped` whenever you like; nothing reads them.
+- **Upload episodes** now also reads each video's length, grabs a thumbnail (stored next to the video as `<file name>.jpg`), and lets you set a title and Published / Draft per episode.
+- **Episode list** (Episodes button on a drama): publish / unpublish, edit title, replace video (new file, new thumbnail and length; old files removed), preview, delete.
+- **Publishing a drama** no longer changes its episodes; each episode keeps its own Published / Draft setting.
+- **Private bucket.** Covers, videos and thumbnails are served with signed links (valid for at least a day), in the app API and in the console.
+- `cover_url_b2` and `url_b2` are kept, unused, for later.
+- The old scraper import scripts (`migrate.js`, `migrate-table.js`, `migrate-episodes-*.js`, `setup-turso-tables.js`) write the old columns; don't run them against this database.

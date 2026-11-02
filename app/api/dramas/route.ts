@@ -1,4 +1,5 @@
 import { listDramas } from "@/lib/db";
+import { signDramaCovers } from "@/lib/dramaMedia";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
       query,
       cursor: isNaN(cursor as number) ? undefined : cursor,
     });
-    return Response.json(result);
+    return Response.json({ ...result, items: await signDramaCovers(result.items) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Database query failed";
     return Response.json({ error: message }, { status: 500 });

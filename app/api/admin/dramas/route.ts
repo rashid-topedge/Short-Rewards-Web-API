@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireStaff } from "@/lib/auth";
 import { listDramasAdmin, createDramaAdmin, dramaStorageFolderInUse, logActivity } from "@/lib/db";
 import { dramaPermissions, validNewDramaFolder } from "@/lib/dramaAccess";
+import { withCoverPreviews } from "@/lib/dramaMedia";
 import { actorOf } from "@/lib/reelPermissions";
 
 /**
@@ -28,9 +29,11 @@ export async function GET(req: NextRequest) {
     cursor,
     createdById: searchParams.get("mine") === "1" ? session.actorId : undefined,
   });
+  // `cover` stays as stored (the edit form saves it back); `previewCover` is a signed link for display.
+  const items = await withCoverPreviews(data.items);
   return NextResponse.json({
     ...data,
-    items: data.items.map((d) => ({ ...d, permissions: dramaPermissions(session, d.createdById) })),
+    items: items.map((d) => ({ ...d, permissions: dramaPermissions(session, d.createdById) })),
   });
 }
 

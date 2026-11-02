@@ -11,6 +11,7 @@ type ScanFolder = {
   orphanCount: number;
   orphanBytes: number;
   sample: string[];
+  error?: string;
 };
 
 function formatBytes(bytes: number): string {
@@ -53,8 +54,13 @@ export default function StorageCleanupCard() {
       if (!res.ok) throw new Error(data.error || "Request failed");
       if (action === "scan") {
         setScan(data.folders);
-        const total = (data.folders as ScanFolder[]).reduce((n, f) => n + f.orphanCount, 0);
-        setMessage(total ? `Found ${total} unused file(s).` : "No unused files found.");
+        const folders = data.folders as ScanFolder[];
+        const total = folders.reduce((n, f) => n + f.orphanCount, 0);
+        const failed = folders.filter((f) => f.error);
+        setMessage(
+          (total ? `Found ${total} unused file(s).` : "No unused files found.") +
+            failed.map((f) => ` Couldn't check ${f.prefix}: ${f.error}`).join("")
+        );
       } else {
         if (action === "delete-orphans") setScan(null);
         setMessage(

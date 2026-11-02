@@ -1,4 +1,5 @@
 import { getDrama, listEpisodes } from "@/lib/db";
+import { signEpisodes } from "@/lib/dramaMedia";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +16,8 @@ export async function GET(
   try {
     const drama = await getDrama(id);
     if (!drama) return Response.json({ error: "Drama not found" }, { status: 404 });
-    const episodes = await listEpisodes(id);
+    // Each episode: ep, title, playUrl, thumbnailUrl, durationSeconds (links signed for the private bucket).
+    const episodes = await signEpisodes(await listEpisodes(id));
     return Response.json({ dramaId: id, episodes });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Database query failed";

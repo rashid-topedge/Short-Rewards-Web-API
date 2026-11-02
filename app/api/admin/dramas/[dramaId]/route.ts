@@ -5,6 +5,7 @@ import { getDrama, updateDramaAdmin, deleteDramaAdmin, logActivity } from "@/lib
 import { dramaForChange, dramaOwnerNote, dramaPermissions } from "@/lib/dramaAccess";
 import { actorOf, canManageOwned } from "@/lib/reelPermissions";
 import { getDramaOwnerInfo } from "@/lib/db";
+import { withCoverPreviews } from "@/lib/dramaMedia";
 
 type Ctx = { params: Promise<{ dramaId: string }> };
 
@@ -21,8 +22,9 @@ export async function GET(req: NextRequest, { params }: Ctx) {
   if (!drama || !owner) {
     return NextResponse.json({ error: "Drama not found" }, { status: 404 });
   }
+  const [withPreview] = await withCoverPreviews([drama]);
   return NextResponse.json({
-    ...drama,
+    ...withPreview,
     createdById: owner.createdById,
     createdByName: owner.createdByName,
     permissions: dramaPermissions(auth.session, owner.createdById),

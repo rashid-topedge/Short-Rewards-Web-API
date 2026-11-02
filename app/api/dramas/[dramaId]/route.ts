@@ -1,4 +1,5 @@
 import { getDrama } from "@/lib/db";
+import { signDramaDetail } from "@/lib/dramaMedia";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +16,7 @@ export async function GET(
   try {
     const drama = await getDrama(id);
     if (!drama) return Response.json({ error: "Drama not found" }, { status: 404 });
-    return Response.json(drama);
+    return Response.json(await signDramaDetail(drama));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Database query failed";
     return Response.json({ error: message }, { status: 500 });

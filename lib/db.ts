@@ -93,7 +93,10 @@ interface DramaDetailRow extends DramaListRow {
 
 interface EpisodeRow {
   ep: number;
+  title: string | null;
   url: string | null;
+  thumbnail_url: string | null;
+  duration_seconds: number | null;
   is_published: number;
 }
 
@@ -233,9 +236,9 @@ async function initDb(): Promise<DbApi> {
 
 // Bump this whenever `statements` below changes. On a cold start we read one
 // row instead of re-running ~40 DDL statements against Turso.
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
-async function createSchema(db: QueryApi): Promise<void> {
+async function createSchema(db: DbApi): Promise<void> {
   await db.run(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const current = (await db.get("SELECT value FROM schema_meta WHERE key = 'version'")) as
     | { value: string }
@@ -245,6 +248,39 @@ async function createSchema(db: QueryApi): Promise<void> {
   // Turso/libsql does NOT allow multiple SQL statements in a single execute() call.
   // Each statement must be sent separately.
   const statements = [
+    // ---- v15: your own dramas and episodes (see migrateDramaTablesV15 for existing databases)
+    `CREATE TABLE IF NOT EXISTS dramas (
+      drama_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      slug TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      synopsis TEXT,
+      cover TEXT,
+      cover_url_b2 TEXT,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      play_count INTEGER NOT NULL DEFAULT 0,
+      like_count INTEGER NOT NULL DEFAULT 0,
+      episode_count INTEGER NOT NULL DEFAULT 0,
+      latest_episode_label TEXT,
+      is_published INTEGER NOT NULL DEFAULT 0,
+      storage_folder TEXT,
+      created_by_id TEXT,
+      created_by_name TEXT,
+      created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
+    )`,
+    `CREATE TABLE IF NOT EXISTS episodes (
+      drama_id INTEGER NOT NULL,
+      ep INTEGER NOT NULL,
+      title TEXT,
+      url TEXT NOT NULL,
+      url_b2 TEXT,
+      thumbnail_url TEXT,
+      duration_seconds INTEGER,
+      is_published INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+      PRIMARY KEY (drama_id, ep)
+    ) WITHOUT ROWID`,
     `CREATE TABLE IF NOT EXISTS users (
       user_id TEXT PRIMARY KEY,
       coins INTEGER NOT NULL DEFAULT 50,
@@ -304,7 +340,7 @@ async function createSchema(db: QueryApi): Promise<void> {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_coin_transactions_user ON coin_transactions(user_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_dramas_published ON dramas (is_published, drama_id DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_episodes_published ON episodes (drama_id, is_published, ep ASC)`,
+    // (episodes need no index besides their (drama_id, ep) primary key)
     `CREATE INDEX IF NOT EXISTS idx_reels_published ON reels (is_published, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_reels_drama ON reels (drama_id)`,
     // Reel feed indexes matching the actual queries (they sort by reel_id, not created_at).
@@ -317,7 +353,6 @@ async function createSchema(db: QueryApi): Promise<void> {
     `CREATE INDEX IF NOT EXISTS idx_redemptions_user ON redemption_requests(user_id, created_at DESC)`,
     // Migration for B2 URL columns and settings
     `ALTER TABLE dramas ADD COLUMN cover_url_b2 TEXT`,
-    `ALTER TABLE episodes ADD COLUMN url_b2 TEXT`,
     `ALTER TABLE reels ADD COLUMN video_url_b2 TEXT`,
     `ALTER TABLE redemption_requests ADD COLUMN receipt_url_b2 TEXT`,
     // Multi-account B2 config (one account per folder type: dramas / reels / payouts)
@@ -534,11 +569,127 @@ async function createSchema(db: QueryApi): Promise<void> {
     }
   }
 
+  await migrateDramaTablesV15(db);
+
   await db.run(
     `INSERT INTO schema_meta (key, value) VALUES ('version', ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     [String(SCHEMA_VERSION)]
   );
+}
+
+/** Milliseconds since 1970 for a date stored as text ("2026-05-01 10:00:00") or a number; now when unknown. */
+const TO_MS = (col: string) =>
+  `CASE WHEN typeof(${col}) IN ('integer','real') THEN CAST(${col} AS INTEGER)
+        WHEN typeof(${col}) = 'text' AND ${col} GLOB '[0-9]*' AND ${col} NOT GLOB '*[^0-9.]*' THEN CAST(${col} AS INTEGER)
+        WHEN typeof(${col}) = 'text' AND strftime('%s', ${col}) IS NOT NULL THEN CAST(strftime('%s', ${col}) AS INTEGER) * 1000
+        ELSE (CAST(strftime('%s','now') AS INTEGER) * 1000) END`;
+
+async function tableColumns(db: QueryApi, table: string): Promise<Set<string>> {
+  const rows = (await db.all(`SELECT name FROM pragma_table_info('${table}')`)) as { name: string }[];
+  return new Set(rows.map((r) => r.name));
+}
+
+/**
+ * v15, once per existing database: dramas and episodes hold only your own
+ * content (uploaded from the console), no scraped data.
+ * - dramas is cleaned up IN PLACE (reels reference it by foreign key, so it is
+ *   never renamed or dropped): rows with no creator (scraped) are copied to
+ *   dramas_scraped and removed, the scraping columns are dropped, dates become
+ *   milliseconds. Its ID sequence carries on, so new IDs never reuse old ones
+ *   (episode rewards and coin history refer to drama IDs).
+ * - episodes is rebuilt: the old table is kept as episodes_scraped (nothing
+ *   references it), the new one is keyed on (drama_id, ep) and gets title,
+ *   thumbnail and duration. Episodes of the dramas that remain are moved across.
+ * - reels whose drama no longer exists are unlinked (the reels stay).
+ * Everything runs in one all-or-nothing batch.
+ */
+async function migrateDramaTablesV15(db: DbApi): Promise<void> {
+  await switchToOwnDramaTables(db);
+  // Two dramas never share a bucket folder (fresh and upgraded databases alike).
+  try {
+    await db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_dramas_folder ON dramas (storage_folder) WHERE storage_folder IS NOT NULL`);
+  } catch (err) {
+    console.error("Schema v15: couldn't add the unique folder index (two dramas share a folder?):", err);
+  }
+}
+
+async function switchToOwnDramaTables(db: DbApi): Promise<void> {
+  const epCols = await tableColumns(db, "episodes");
+  if (!epCols.has("id") && !epCols.has("source")) return; // already new (or a fresh database)
+  const dramaCols = await tableColumns(db, "dramas");
+  const now = Date.now();
+
+  const steps: { sql: string; args?: InValue[] }[] = [
+    // Scraped dramas (no creator) → archive, then out of the app's way.
+    { sql: `CREATE TABLE IF NOT EXISTS dramas_scraped AS SELECT * FROM dramas WHERE 0` },
+    { sql: `INSERT INTO dramas_scraped SELECT * FROM dramas WHERE created_by_id IS NULL` },
+    // Highest drama ID ever used (rows, rewards, the ID sequence): new dramas start above it.
+    {
+      sql: `INSERT INTO admin_config (key, value, updated_at)
+            SELECT 'drama_id_floor', CAST(MAX(
+              COALESCE((SELECT MAX(drama_id) FROM dramas), 0),
+              COALESCE((SELECT MAX(drama_id) FROM user_episode_rewards), 0),
+              COALESCE((SELECT MAX(drama_id) FROM episodes), 0),
+              COALESCE((SELECT MAX(drama_id) FROM reels), 0),
+              COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'dramas'), 0)
+            ) AS TEXT), ?
+            WHERE 1
+            ON CONFLICT(key) DO UPDATE SET value = CAST(MAX(CAST(admin_config.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)`,
+      args: [now],
+    },
+    {
+      sql: `UPDATE reels SET drama_id = NULL, episode_number = NULL
+            WHERE drama_id IS NOT NULL
+              AND drama_id NOT IN (SELECT drama_id FROM dramas WHERE created_by_id IS NOT NULL)`,
+    },
+    { sql: `DELETE FROM dramas WHERE created_by_id IS NULL` },
+  ];
+  for (const col of ["raw_json", "fetched_at"]) {
+    if (dramaCols.has(col)) steps.push({ sql: `ALTER TABLE dramas DROP COLUMN ${col}` });
+  }
+  steps.push(
+    { sql: `UPDATE dramas SET created_at = ${TO_MS("created_at")}, updated_at = ${TO_MS("updated_at")}` },
+    { sql: `UPDATE dramas SET title = 'Untitled' WHERE title IS NULL OR trim(title) = ''` },
+    // Episodes: keep the old table as an archive, build the new one.
+    { sql: `ALTER TABLE episodes RENAME TO episodes_scraped` },
+    { sql: `DROP INDEX IF EXISTS idx_episodes_published` },
+    { sql: `CREATE TABLE episodes (
+      drama_id INTEGER NOT NULL,
+      ep INTEGER NOT NULL,
+      title TEXT,
+      url TEXT NOT NULL,
+      url_b2 TEXT,
+      thumbnail_url TEXT,
+      duration_seconds INTEGER,
+      is_published INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+      PRIMARY KEY (drama_id, ep)
+    ) WITHOUT ROWID` },
+    {
+      sql: `INSERT INTO episodes (drama_id, ep, url, url_b2, is_published, created_at, updated_at)
+            SELECT e.drama_id, e.ep, e.url, ${epCols.has("url_b2") ? "e.url_b2" : "NULL"}, COALESCE(e.is_published, 1), ?, ?
+            FROM episodes_scraped e
+            WHERE e.drama_id IN (SELECT drama_id FROM dramas) AND e.url IS NOT NULL AND e.url <> ''
+            ON CONFLICT(drama_id, ep) DO NOTHING`,
+      args: [now, now],
+    },
+    {
+      sql: `UPDATE dramas SET
+              episode_count = (SELECT COUNT(*) FROM episodes e WHERE e.drama_id = dramas.drama_id),
+              latest_episode_label = (SELECT 'EP ' || MAX(ep) FROM episodes e WHERE e.drama_id = dramas.drama_id)`,
+    }
+  );
+
+  try {
+    await db.batch(steps, "write");
+    console.log("Schema v15: dramas cleaned up, episodes rebuilt (old rows kept in dramas_scraped / episodes_scraped).");
+  } catch (err) {
+    // Another server instance may have just done it: fine if the new table is there now.
+    const after = await tableColumns(db, "episodes");
+    if (after.has("id") || after.has("source")) throw err;
+  }
 }
 
 function parseTags(raw: string | null): string[] {
@@ -874,7 +1025,7 @@ export async function getDrama(dramaId: number, includeUnpublished = false): Pro
 export async function listEpisodes(dramaId: number, includeUnpublished = false): Promise<EpisodeItem[]> {
   const db = await getDb();
   let sql = `
-    SELECT ep, url, is_published
+    SELECT ep, title, url, thumbnail_url, duration_seconds, is_published
     FROM episodes
     WHERE drama_id = ?
   `;
@@ -886,7 +1037,10 @@ export async function listEpisodes(dramaId: number, includeUnpublished = false):
   const rows = await db.all(sql, [dramaId]) as EpisodeRow[];
   return rows.map((row) => ({
     ep: row.ep,
+    title: row.title ?? null,
     playUrl: row.url,
+    thumbnailUrl: row.thumbnail_url ?? null,
+    durationSeconds: row.duration_seconds ?? null,
     isPublished: Boolean(row.is_published),
   }));
 }
@@ -2531,18 +2685,23 @@ export async function createDramaAdmin(data: {
   const tagsJson = JSON.stringify(data.tags ?? []);
   const now = Date.now();
   const isPublishedVal = data.isPublished ? 1 : 0;
+  // New IDs always go above every ID used before (old dramas, rewards, reels),
+  // so a new drama never inherits someone's old episode rewards.
+  const floor = Number(await getAdminConfig("drama_id_floor").catch(() => null)) || 0;
 
-  await db.run(
+  const insert = () => db.run(
     `
     INSERT INTO dramas (
+      drama_id,
       slug, title, cover, synopsis, tags_json,
       play_count, like_count, episode_count, latest_episode_label,
-      is_published, raw_json, fetched_at, created_at, updated_at,
+      is_published, created_at, updated_at,
       created_by_id, created_by_name, storage_folder
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, datetime('now'), datetime('now'), ?, ?, ?)
+    VALUES (MAX(COALESCE((SELECT MAX(drama_id) FROM dramas), 0), ?) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
     [
+      floor,
       slug,
       data.title.trim(),
       data.cover?.trim() || null,
@@ -2554,11 +2713,22 @@ export async function createDramaAdmin(data: {
       data.latestEpisodeLabel?.trim() || null,
       isPublishedVal,
       now,
+      now,
       data.createdBy?.id ?? null,
       data.createdBy?.name ?? null,
       data.storageFolder ?? null,
     ]
   );
+  // Two dramas created at the same moment can pick the same ID: retry.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await insert();
+      break;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt >= 4 || !/UNIQUE constraint failed: dramas\.drama_id|PRIMARY KEY/i.test(message)) throw err;
+    }
+  }
 
   const row = (await db.get("SELECT * FROM dramas WHERE slug = ?", [slug])) as DramaDetailRow;
   return mapDramaCard(row);
@@ -2699,8 +2869,9 @@ export async function deleteDramaAdmin(
       | undefined;
     if (!drama) return false;
     if (opts.mayDeleteDrama && !opts.mayDeleteDrama(drama.created_by_id ?? null)) return false;
-    const episodes = (await tx.all("SELECT url FROM episodes WHERE drama_id = ?", [dramaId])) as {
+    const episodes = (await tx.all("SELECT url, thumbnail_url FROM episodes WHERE drama_id = ?", [dramaId])) as {
       url: string | null;
+      thumbnail_url: string | null;
     }[];
     const allReels = (await tx.all("SELECT reel_id, video_url, thumbnail_url, created_by_id FROM reels WHERE drama_id = ?", [
       dramaId,
@@ -2720,7 +2891,7 @@ export async function deleteDramaAdmin(
     }
     await tx.run("DELETE FROM dramas WHERE drama_id = ?", [dramaId]);
 
-    await enqueueFileDeletes(tx, "dramas", [drama.cover, ...episodes.map((e) => e.url)]);
+    await enqueueFileDeletes(tx, "dramas", [drama.cover, ...episodes.flatMap((e) => [e.url, e.thumbnail_url])]);
     await enqueueFileDeletes(tx, "reels", reels.flatMap((r) => [r.video_url, r.thumbnail_url]));
     return true;
   });
@@ -2744,7 +2915,10 @@ export async function bulkDeleteDramasAdmin(
     const ph = ids.map(() => "?").join(",");
     return db.tx(async (tx) => {
       const covers = (await tx.all(`SELECT cover FROM dramas WHERE drama_id IN (${ph})`, ids)) as { cover: string | null }[];
-      const eps = (await tx.all(`SELECT url FROM episodes WHERE drama_id IN (${ph})`, ids)) as { url: string | null }[];
+      const eps = (await tx.all(`SELECT url, thumbnail_url FROM episodes WHERE drama_id IN (${ph})`, ids)) as {
+        url: string | null;
+        thumbnail_url: string | null;
+      }[];
       const reels = (await tx.all(`SELECT video_url, thumbnail_url FROM reels WHERE drama_id IN (${ph})`, ids)) as {
         video_url: string | null;
         thumbnail_url: string | null;
@@ -2752,7 +2926,7 @@ export async function bulkDeleteDramasAdmin(
       await tx.run(`DELETE FROM episodes WHERE drama_id IN (${ph})`, ids);
       await tx.run(`DELETE FROM reels WHERE drama_id IN (${ph})`, ids);
       const res = await tx.run(`DELETE FROM dramas WHERE drama_id IN (${ph})`, ids);
-      await enqueueFileDeletes(tx, "dramas", [...covers.map((c) => c.cover), ...eps.map((e) => e.url)]);
+      await enqueueFileDeletes(tx, "dramas", [...covers.map((c) => c.cover), ...eps.flatMap((e) => [e.url, e.thumbnail_url])]);
       await enqueueFileDeletes(tx, "reels", reels.flatMap((r) => [r.video_url, r.thumbnail_url]));
       return res.changes;
     });
@@ -2791,13 +2965,10 @@ export async function bulkUpdateDramasPublish(
   const db = await getDb();
   const placeholders = dramaIds.map(() => "?").join(",");
   const pubVal = isPublished ? 1 : 0;
+  // Dramas only: each episode keeps its own published / draft setting.
   await db.run(
-    `UPDATE dramas SET is_published = ?, updated_at = datetime('now') WHERE drama_id IN (${placeholders})`,
-    [pubVal, ...dramaIds] as InValue[]
-  );
-  await db.run(
-    `UPDATE episodes SET is_published = ? WHERE drama_id IN (${placeholders})`,
-    [pubVal, ...dramaIds] as InValue[]
+    `UPDATE dramas SET is_published = ?, updated_at = ? WHERE drama_id IN (${placeholders})`,
+    [pubVal, Date.now(), ...dramaIds] as InValue[]
   );
   return dramaIds.length;
 }
@@ -2809,80 +2980,120 @@ export async function bulkUpdateAllDramasPublish(
   invalidateCounts("dramas");
   const db = await getDb();
   const pubVal = isPublished ? 1 : 0;
-  let sql = `UPDATE dramas SET is_published = ?, updated_at = datetime('now')`;
+  // Dramas only: each episode keeps its own published / draft setting.
+  let sql = `UPDATE dramas SET is_published = ?, updated_at = ?`;
   if (onlyWithEpisodes) {
-    sql += ` WHERE episode_count > 0 OR drama_id IN (SELECT DISTINCT drama_id FROM episodes WHERE url IS NOT NULL AND url != '')`;
+    sql += ` WHERE drama_id IN (SELECT DISTINCT drama_id FROM episodes WHERE is_published = 1)`;
   }
-  await db.run(sql, [pubVal] as InValue[]);
-  await db.run(`UPDATE episodes SET is_published = ?`, [pubVal] as InValue[]);
+  await db.run(sql, [pubVal, Date.now()] as InValue[]);
   return 1;
 }
 
-export async function saveEpisodeAdmin(
-  dramaId: number,
-  ep: number,
-  url: string,
-  isPublished = true
-): Promise<EpisodeItem[]> {
+/** Keeps the drama's episode count and "EP n" label in step with its episodes. */
+async function refreshDramaEpisodeStats(q: QueryApi, dramaId: number): Promise<void> {
+  await q.run(
+    `UPDATE dramas
+     SET episode_count = (SELECT COUNT(*) FROM episodes WHERE drama_id = ?),
+         latest_episode_label = (SELECT 'EP ' || MAX(ep) FROM episodes WHERE drama_id = ?),
+         updated_at = ?
+     WHERE drama_id = ?`,
+    [dramaId, dramaId, Date.now(), dramaId]
+  );
+}
+
+export type EpisodeInput = {
+  url: string;
+  title?: string | null;
+  thumbnailUrl?: string | null;
+  durationSeconds?: number | null;
+  isPublished?: boolean;
+};
+
+/**
+ * Adds an episode, or replaces the one with that number (its old video and
+ * thumbnail files go to the B2 delete queue). On replace, a title / thumbnail /
+ * length that isn't sent keeps its current value.
+ */
+export async function saveEpisodeAdmin(dramaId: number, ep: number, input: EpisodeInput): Promise<EpisodeItem[]> {
   const db = await getDb();
   const now = Date.now();
-  const pubVal = isPublished ? 1 : 0;
+  const url = input.url.trim();
+  const title = input.title === undefined ? undefined : input.title?.trim() || null;
+  const thumb = input.thumbnailUrl === undefined ? undefined : input.thumbnailUrl?.trim() || null;
+  const duration =
+    input.durationSeconds === undefined
+      ? undefined
+      : input.durationSeconds !== null && Number.isFinite(input.durationSeconds) && input.durationSeconds > 0
+      ? Math.round(input.durationSeconds)
+      : null;
 
   await db.tx(async (tx) => {
-    const old = (await tx.get("SELECT url FROM episodes WHERE drama_id = ? AND ep = ?", [dramaId, ep])) as
-      | { url: string | null }
+    const old = (await tx.get(
+      "SELECT url, title, thumbnail_url, duration_seconds, is_published FROM episodes WHERE drama_id = ? AND ep = ?",
+      [dramaId, ep]
+    )) as
+      | { url: string | null; title: string | null; thumbnail_url: string | null; duration_seconds: number | null; is_published: number }
       | undefined;
+    const next = {
+      title: title === undefined ? old?.title ?? null : title,
+      thumb: thumb === undefined ? old?.thumbnail_url ?? null : thumb,
+      duration: duration === undefined ? old?.duration_seconds ?? null : duration,
+      published: input.isPublished === undefined ? (old ? old.is_published : 1) : input.isPublished ? 1 : 0,
+    };
     await tx.run(
-      `
-      INSERT INTO episodes (drama_id, ep, url, is_published, source, raw_json, fetched_at)
-      VALUES (?, ?, ?, ?, 1, '{}', ?)
-      ON CONFLICT(drama_id, ep) DO UPDATE SET url = excluded.url, is_published = excluded.is_published, fetched_at = excluded.fetched_at
-    `,
-      [dramaId, ep, url.trim(), pubVal, now]
+      `INSERT INTO episodes (drama_id, ep, title, url, thumbnail_url, duration_seconds, is_published, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(drama_id, ep) DO UPDATE SET
+         title = excluded.title, url = excluded.url, thumbnail_url = excluded.thumbnail_url,
+         duration_seconds = excluded.duration_seconds, is_published = excluded.is_published,
+         updated_at = excluded.updated_at`,
+      [dramaId, ep, next.title, url, next.thumb, next.duration, next.published, now, now]
     );
-    await tx.run(
-      `UPDATE dramas
-       SET episode_count = (SELECT COUNT(*) FROM episodes WHERE drama_id = ?),
-           latest_episode_label = 'EP ' || (SELECT MAX(ep) FROM episodes WHERE drama_id = ?),
-           updated_at = datetime('now')
-       WHERE drama_id = ?`,
-      [dramaId, dramaId, dramaId]
-    );
-    if (old?.url && old.url !== url.trim()) await enqueueFileDeletes(tx, "dramas", [old.url]);
+    await refreshDramaEpisodeStats(tx, dramaId);
+    const replaced: (string | null)[] = [];
+    if (old?.url && old.url !== url) replaced.push(old.url);
+    if (old?.thumbnail_url && old.thumbnail_url !== next.thumb) replaced.push(old.thumbnail_url);
+    if (replaced.length) await enqueueFileDeletes(tx, "dramas", replaced);
   });
 
   return listEpisodes(dramaId, true);
 }
 
-export async function updateEpisodePublishAdmin(
+/** Changes an episode's title and/or published state. Returns null if there's no such episode. */
+export async function updateEpisodeAdmin(
   dramaId: number,
   ep: number,
-  isPublished: boolean
-): Promise<EpisodeItem[]> {
+  changes: { title?: string | null; isPublished?: boolean }
+): Promise<EpisodeItem[] | null> {
   const db = await getDb();
-  const pubVal = isPublished ? 1 : 0;
-  await db.run("UPDATE episodes SET is_published = ? WHERE drama_id = ? AND ep = ?", [
-    pubVal,
-    dramaId,
-    ep,
-  ]);
+  const sets: string[] = ["updated_at = ?"];
+  const params: InValue[] = [Date.now()];
+  if (changes.title !== undefined) {
+    sets.push("title = ?");
+    params.push(changes.title?.trim() || null);
+  }
+  if (changes.isPublished !== undefined) {
+    sets.push("is_published = ?");
+    params.push(changes.isPublished ? 1 : 0);
+  }
+  const res = await db.run(`UPDATE episodes SET ${sets.join(", ")} WHERE drama_id = ? AND ep = ?`, [...params, dramaId, ep]);
+  if (res.changes !== 1) return null;
   return listEpisodes(dramaId, true);
+}
+
+export async function updateEpisodePublishAdmin(dramaId: number, ep: number, isPublished: boolean): Promise<EpisodeItem[]> {
+  return (await updateEpisodeAdmin(dramaId, ep, { isPublished })) ?? listEpisodes(dramaId, true);
 }
 
 export async function deleteEpisodeAdmin(dramaId: number, ep: number): Promise<EpisodeItem[]> {
   const db = await getDb();
   await db.tx(async (tx) => {
-    const row = (await tx.get("SELECT url FROM episodes WHERE drama_id = ? AND ep = ?", [dramaId, ep])) as
-      | { url: string | null }
+    const row = (await tx.get("SELECT url, thumbnail_url FROM episodes WHERE drama_id = ? AND ep = ?", [dramaId, ep])) as
+      | { url: string | null; thumbnail_url: string | null }
       | undefined;
     await tx.run("DELETE FROM episodes WHERE drama_id = ? AND ep = ?", [dramaId, ep]);
-    await tx.run(
-      `UPDATE dramas
-       SET episode_count = (SELECT COUNT(*) FROM episodes WHERE drama_id = ?), updated_at = datetime('now')
-       WHERE drama_id = ?`,
-      [dramaId, dramaId]
-    );
-    if (row) await enqueueFileDeletes(tx, "dramas", [row.url]);
+    await refreshDramaEpisodeStats(tx, dramaId);
+    if (row) await enqueueFileDeletes(tx, "dramas", [row.url, row.thumbnail_url]);
   });
 
   return listEpisodes(dramaId, true);
@@ -3918,6 +4129,7 @@ export async function isMediaFileStillUsed(fileUrl: string | null, fileName: str
        SELECT video_url AS u FROM reels WHERE video_url = ?1 OR instr(video_url, ?2) > 0
        UNION ALL SELECT thumbnail_url FROM reels WHERE thumbnail_url = ?1 OR instr(thumbnail_url, ?2) > 0
        UNION ALL SELECT url FROM episodes WHERE url = ?1 OR instr(url, ?2) > 0
+       UNION ALL SELECT thumbnail_url FROM episodes WHERE thumbnail_url = ?1 OR instr(thumbnail_url, ?2) > 0
        UNION ALL SELECT cover FROM dramas WHERE cover = ?1 OR instr(cover, ?2) > 0
      ) LIMIT 1`,
     [url, suffix]
@@ -3957,7 +4169,7 @@ export async function listReferencedMediaUrls(): Promise<string[]> {
   const results = await db.batch(
     [
       { sql: "SELECT video_url AS u FROM reels UNION ALL SELECT thumbnail_url FROM reels WHERE thumbnail_url IS NOT NULL" },
-      { sql: "SELECT url AS u FROM episodes WHERE url IS NOT NULL" },
+      { sql: "SELECT url AS u FROM episodes WHERE url IS NOT NULL UNION ALL SELECT thumbnail_url FROM episodes WHERE thumbnail_url IS NOT NULL" },
       { sql: "SELECT cover AS u FROM dramas WHERE cover IS NOT NULL" },
     ],
     "read"
