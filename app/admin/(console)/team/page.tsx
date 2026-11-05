@@ -391,7 +391,7 @@ function AccountDialog({
         e.preventDefault();
         if (!saving) onClose();
       }}
-      className="m-auto w-full max-w-md bg-transparent p-4 text-neutral-100 backdrop:bg-black/80 backdrop:backdrop-blur-sm"
+      className="m-auto max-h-[100dvh] w-full max-w-md overflow-y-auto overscroll-contain bg-transparent p-2 text-neutral-100 backdrop:bg-black/80 backdrop:backdrop-blur-sm sm:p-4"
     >
       {state && (
         <form onSubmit={submit} noValidate className="space-y-4 rounded-2xl border border-[#26324a] bg-[#0d121c] p-5 shadow-2xl">

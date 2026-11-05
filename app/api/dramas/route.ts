@@ -16,9 +16,10 @@ export async function GET(request: Request) {
       query,
       cursor: isNaN(cursor as number) ? undefined : cursor,
     });
-    return Response.json({ ...result, items: await signDramaCovers(result.items) });
+    // Same for every viewer; signed links last at least a day, so a short CDN cache is safe.
+    return Response.json({ ...result, items: await signDramaCovers(result.items) }, { headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Database query failed";
-    return Response.json({ error: message }, { status: 500 });
+    console.error("Failed to list dramas:", error);
+    return Response.json({ error: "Failed to load dramas" }, { status: 500 });
   }
 }

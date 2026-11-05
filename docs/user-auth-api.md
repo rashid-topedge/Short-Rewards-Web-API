@@ -24,6 +24,7 @@ POST /api/user/sync
 { "requestToken": true, "userId": "<old id>" } // existing installs keeping their pre-auth account (works once)
 → 200 { ...profile, accessToken, accessTokenExpiresIn, refreshToken, refreshTokenExpiresIn }
 → 409 ACCOUNT_ALREADY_CLAIMED   // that old userId already has a token: use Google sign-in to recover it
+→ 429 TOO_MANY_ACCOUNTS         // too many new accounts from one network this hour (Retry-After header)
 ```
 
 ### Every API call
@@ -107,7 +108,9 @@ on screen can always be updated from the response.
 Check-in, rewards (`/api/user/reward/ad|episode|reel`) and redeem return the
 user's profile. By default it includes the 30 most recent transactions. Add
 `?lite=1` to skip them (saves a database query per reward), and load history
-only on the wallet screen:
+only on the wallet screen. The same works for the profile itself:
+`POST /api/user/sync?lite=1` (or `{ "lite": true }` in the body) returns the profile with
+`transactions: []`; use it on app start and pull-to-refresh.
 
 ```
 GET /api/user/transactions?limit=30            Authorization: Bearer <accessToken>
@@ -123,6 +126,8 @@ All auth errors are `{ "error": "<human message>", "code": "<CODE>" }`.
 - `GOOGLE_OAUTH_CLIENT_IDS`: the Web client ID (comma-separate several if needed).
 - `USER_AUTH_ALLOW_LEGACY=true` during the app rollout; set it to `false` once all users are on the new version.
 - `REDEEM_REQUIRE_GOOGLE`: optional, `false` by default.
+- `SIGNUP_LIMIT_PER_HOUR`: new anonymous accounts allowed per IP per hour (default 30, `0` = off).
+  Mobile networks share IPs, so don't set it too low.
 
 ## Reward amounts (set by admin)
 
@@ -193,6 +198,7 @@ Authorization: Bearer <accessToken>    (optional)
   `rewardClaimed` (true = already paid) and the response has `personalized: true`.
 - **Not signed in:** the normal feed, as before.
 - Every item has `rewardCoins`: what that reel pays by length (with a watch token).
+- Signed in, every item also has `liked` (this user has liked it).
 - Always pass `nextCursor` back unchanged (it now looks like `n:…` / `s:…`); stop when it's `null`.
   `sort=random` still returns `"random"` as the cursor: just ask again for more.
 - An expired token gets `401 TOKEN_EXPIRED` here too: refresh and retry. Add `personal=0` to get the
@@ -200,6 +206,21 @@ Authorization: Bearer <accessToken>    (optional)
 - Responses are per user: don't cache them in a shared cache.
 - "Seen" means "earned coins for". A reel watched without a claim (e.g. after the daily limit)
   stays in the new part, so it can still pay later.
+
+## Reel detail, views and likes
+
+```
+GET  /api/reels/{reelId}                       Authorization: Bearer <accessToken>   (optional)
+→ { ...reel, rewardCoins }                     + rewardClaimed, liked when signed in
+POST /api/reels/{reelId}  { "action": "view" }                → counts a view
+POST /api/reels/{reelId}  { "action": "like" | "unlike" }     Authorization: Bearer <accessToken>
+→ { success, reelId, liked, likeCount }
+```
+- With a token a like counts **once per user**: liking again or unliking a reel that isn't liked
+  changes nothing, and the like is kept across reinstalls (it's tied to the account). Use the
+  returned `likeCount` / `liked` to update the UI.
+- Without a token (old app builds) like/unlike still just moves the count; send the token.
+- 404 when the reel doesn't exist or isn't published.
 
 ## Multi-part reels (long videos split into 3-minute parts)
 
@@ -234,8 +255,12 @@ GET /api/dramas?limit=24[&q=…][&cursor=…]     → { items: [ { dramaId, slug
 GET /api/dramas/{dramaId}                     → { dramaId, slug, title, cover, synopsis, tags, playCount,
                                                   likeCount, episodeCount, latestEpisodeLabel }
 GET /api/dramas/{dramaId}/episodes            → { dramaId, episodes: [ { ep, title, playUrl, thumbnailUrl,
-                                                  durationSeconds, isPublished } ] }
+                                                  durationSeconds, isPublished, rewardCoins } ] }
+    Authorization: Bearer <accessToken> (optional) → each episode also has rewardClaimed
 ```
+- Send the token on the episode list so you can show "earned" / "+15 coins" per episode.
+- Signed-out drama and episode responses are cached by the CDN for up to a minute, so a newly
+  published episode can take a minute to appear for signed-out viewers.
 - Only published dramas, and only published episodes, are returned.
 - New per-episode fields: `title` (may be null: show "Episode {ep}"), `thumbnailUrl` (may be null),
   `durationSeconds` (may be null).

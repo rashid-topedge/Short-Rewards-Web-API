@@ -16,9 +16,10 @@ export async function GET(
   try {
     const drama = await getDrama(id);
     if (!drama) return Response.json({ error: "Drama not found" }, { status: 404 });
-    return Response.json(await signDramaDetail(drama));
+    // Same for every viewer; signed links last at least a day, so a short CDN cache is safe.
+    return Response.json(await signDramaDetail(drama), { headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Database query failed";
-    return Response.json({ error: message }, { status: 500 });
+    console.error("Failed to load drama:", error);
+    return Response.json({ error: "Failed to load drama" }, { status: 500 });
   }
 }

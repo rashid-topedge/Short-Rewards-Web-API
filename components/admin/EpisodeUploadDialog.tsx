@@ -3,11 +3,65 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, RotateCcw, Trash2, UploadCloud, X } from "lucide-react";
 import { cancelChunkSession, formatBytes, inspectVideo, uploadFileChunked, UploadAbortedError } from "@/lib/chunkUpload";
+import { Mp4SplitUnsupported, splitVideo } from "@/lib/mp4Split";
 import type { EpisodeItem } from "@/lib/types";
 
 const PARALLEL_UPLOADS = 2;
 const MAX_FILES = 300;
 const VIDEO_ACCEPT = "video/mp4,video/webm,video/quicktime,video/x-matroska,.mp4,.webm,.mov,.mkv,.m4v";
+/** Episodes longer than this are split into parts of about this length (same as reels). */
+const PART_SECONDS = 180;
+/** A last part shorter than this is merged into the previous part. */
+const MIN_LAST_PART_SECONDS = 30;
+
+function isSplittableType(f: File): boolean {
+  return /\.(mp4|m4v|mov)$/i.test(f.name) || f.type === "video/mp4" || f.type === "video/quicktime";
+}
+
+/**
+ * Gives each source file a run of consecutive episode numbers (one per part).
+ * Files are taken in order of the number in their name; a file starts at that
+ * number, or right after the previous file's last part if a split pushed past it
+ * ("EP 1" in 3 parts → 1, 2, 3, so "EP 2" becomes 4). Numbers already used by
+ * files added earlier are skipped; files without a number go after the rest.
+ * Episodes already saved on the drama are not skipped: a clash shows up as
+ * "already exists" with the option to replace it.
+ */
+export function assignEpisodeNumbers(
+  files: { n: number | null; parts: number }[],
+  existing: Iterable<number>,
+  alreadyAdded: Iterable<number>
+): { start: number; source: "name" | "shifted" | "next" }[] {
+  const taken = new Set<number>(alreadyAdded);
+  const all = new Set<number>([...existing, ...taken]);
+  const fits = (s: number, k: number) => {
+    for (let i = 0; i < k; i++) if (taken.has(s + i)) return false;
+    return true;
+  };
+  let cursor = 1;
+  return files.map(({ n, parts }) => {
+    const k = Math.max(1, parts);
+    let start: number;
+    let source: "name" | "shifted" | "next";
+    if (n !== null) {
+      start = Math.max(n, cursor);
+      source = start === n ? "name" : "shifted";
+    } else {
+      start = Math.max(cursor, Math.max(0, ...all) + 1);
+      source = "next";
+    }
+    if (!fits(start, k)) {
+      while (!fits(start, k)) start++;
+      if (source === "name") source = "shifted";
+    }
+    for (let i = 0; i < k; i++) {
+      taken.add(start + i);
+      all.add(start + i);
+    }
+    cursor = start + k;
+    return { start, source };
+  });
+}
 
 /**
  * Episode number from a file name: "EP 05.mp4", "Episode-12", "e7", "S01E03"
@@ -30,7 +84,11 @@ type Draft = {
   file: File;
   ep: string;
   /** How the number was chosen, shown under the field. */
-  epSource: "name" | "next";
+  epSource: "name" | "shifted" | "next";
+  /** Set when this file is one part of a longer episode video that was split. */
+  part: { number: number; count: number; sourceName: string } | null;
+  /** Shown on the card (e.g. "couldn't split this format"). */
+  note: string | null;
   replace: boolean;
   /** Optional episode title. */
   title: string;
@@ -75,6 +133,8 @@ export default function EpisodeUploadDialog({
   itemsRef.current = items;
   const controllers = useRef(new Map<string, AbortController>());
   const [publish, setPublish] = useState(true);
+  const [splitLong, setSplitLong] = useState(true);
+  const [preparing, setPreparing] = useState(0);
   const [rejected, setRejected] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [announcement, setAnnouncement] = useState("");
@@ -106,42 +166,87 @@ export default function EpisodeUploadDialog({
     setRejected(bad);
     if (!accepted.length) return;
 
-    // Numbers from the file names first, then the next free number for the rest.
-    const used = new Set<number>([...existingEps.current, ...itemsRef.current.map((d) => Number(d.ep)).filter(Boolean)]);
+    // In the order of the numbers in the file names.
     const parsed = accepted
       .map((file) => ({ file, n: episodeNumberFromName(file.name) }))
       .sort((a, b) => (a.n ?? Infinity) - (b.n ?? Infinity) || a.file.name.localeCompare(b.file.name, undefined, { numeric: true }));
-    const taken = new Set<number>();
-    let next = Math.max(0, ...used) + 1;
-    const drafts: Draft[] = parsed.map(({ file, n }) => {
-      let ep: number;
-      let epSource: Draft["epSource"] = "name";
-      if (n !== null && !taken.has(n)) ep = n;
-      else {
-        while (used.has(next) || taken.has(next)) next++;
-        ep = next;
-        epSource = "next";
+
+    // Long MP4/MOV episodes are cut into ~3-minute parts here in the browser
+    // (at keyframes, no re-encoding); each part becomes its own episode.
+    type Source = { file: File; n: number | null; pieces: { file: File; durationSeconds: number | null; part: Draft["part"] }[]; note: string | null };
+    const sources: Source[] = [];
+    let room = MAX_FILES - itemsRef.current.length;
+    let splitCount = 0;
+    const toSplit = splitLong ? parsed.filter((p) => isSplittableType(p.file)).length : 0;
+    if (toSplit) setPreparing((c) => c + toSplit);
+    for (const { file, n } of parsed) {
+      const whole: Source = { file, n, pieces: [{ file, durationSeconds: null, part: null }], note: null };
+      if (splitLong && isSplittableType(file)) {
+        try {
+          const parts = await splitVideo(file, PART_SECONDS, MIN_LAST_PART_SECONDS);
+          if (parts.length <= 1) {
+            whole.pieces[0].durationSeconds = parts[0] ? Math.round(parts[0].durationSeconds) : null;
+          } else if (parts.length > room) {
+            bad.push(`${file.name}: would make ${parts.length} episodes, but only ${Math.max(room, 0)} more fit in this batch`);
+            continue;
+          } else {
+            const base = file.name.replace(/\.[^.]+$/, "");
+            whole.pieces = parts.map((p) => ({
+              file: new File([p.blob], `${base}_part${p.index + 1}.mp4`, { type: "video/mp4" }),
+              durationSeconds: Math.round(p.durationSeconds),
+              part: { number: p.index + 1, count: p.count, sourceName: file.name },
+            }));
+            splitCount++;
+          }
+        } catch (err) {
+          const why = err instanceof Mp4SplitUnsupported ? err.message : "the file couldn't be read for splitting";
+          whole.note = `Not split (${why}). It will upload as one episode.`;
+        } finally {
+          setPreparing((c) => Math.max(0, c - 1));
+        }
       }
-      taken.add(ep);
-      return {
+      if (whole.pieces.length > room) {
+        bad.push(`${file.name}: limit is ${MAX_FILES} files at a time`);
+        continue;
+      }
+      room -= whole.pieces.length;
+      sources.push(whole);
+    }
+    if (bad.length) setRejected([...bad]);
+    if (!sources.length) return;
+
+    // Each file gets a run of numbers (one per part); later files move up to make room.
+    const numbers = assignEpisodeNumbers(
+      sources.map((s) => ({ n: s.n, parts: s.pieces.length })),
+      existingEps.current,
+      itemsRef.current.filter((d) => d.save.status !== "saved").map((d) => Number(d.ep)).filter(Boolean)
+    );
+    const drafts: Draft[] = sources.flatMap((s, i) =>
+      s.pieces.map((piece, j) => ({
         key: `ep-${++keySeq}`,
-        file,
-        ep: String(ep),
-        epSource,
+        file: piece.file,
+        ep: String(numbers[i].start + j),
+        epSource: numbers[i].source,
+        part: piece.part,
+        note: s.note,
         replace: false,
         title: "",
         published: publish,
         inspected: false,
-        durationSeconds: null,
+        durationSeconds: piece.durationSeconds,
         poster: null,
         posterPreview: null,
-        upload: { status: "queued" },
-        save: { status: "idle" },
+        upload: { status: "queued" as const },
+        save: { status: "idle" as const },
         saveRequested: false,
-      };
-    });
+      }))
+    );
     setItems((prev) => [...prev, ...drafts].sort((a, b) => Number(a.ep) - Number(b.ep)));
-    setAnnouncement(`${drafts.length} file${drafts.length === 1 ? "" : "s"} added. Uploading started.`);
+    setAnnouncement(
+      `${drafts.length} episode${drafts.length === 1 ? "" : "s"} added${
+        splitCount ? ` (${splitCount} long video${splitCount === 1 ? "" : "s"} split into parts)` : ""
+      }. Uploading started.`
+    );
 
     // Read each video's length and grab a thumbnail frame, one at a time (like reels).
     for (const d of drafts) {
@@ -149,9 +254,14 @@ export default function EpisodeUploadDialog({
       if (!itemsRef.current.some((x) => x.key === d.key)) continue;
       patch(d.key, {
         inspected: true,
-        durationSeconds: info.durationSeconds,
+        durationSeconds: info.durationSeconds ?? d.durationSeconds,
         poster: info.poster,
         posterPreview: info.poster ? URL.createObjectURL(info.poster) : null,
+        note:
+          d.note ??
+          (splitLong && !d.part && (info.durationSeconds ?? 0) > PART_SECONDS + MIN_LAST_PART_SECONDS
+            ? "Longer than 3 minutes, but only MP4/MOV files can be split. It will upload as one episode."
+            : null),
       });
     }
   };
@@ -338,6 +448,26 @@ export default function EpisodeUploadDialog({
               Episode numbers come from the file names (&ldquo;EP 05.mp4&rdquo; → 5); files without a number get the next free one.
               You can change any number before saving.
             </p>
+            <label className="mx-auto mt-3 inline-flex cursor-pointer items-center gap-2 text-left text-sm text-neutral-200">
+              <input
+                type="checkbox"
+                checked={splitLong}
+                onChange={(e) => setSplitLong(e.target.checked)}
+                className="h-4 w-4 rounded border-[#2b3850] accent-rose-500"
+              />
+              <span>
+                Split videos longer than 3 minutes into 3-minute parts
+                <span className="block text-xs text-neutral-400">
+                  Each part becomes its own episode with the next number (EP 1 in 3 parts → episodes 1, 2, 3, and EP 2 moves to 4). MP4/MOV only.
+                </span>
+              </span>
+            </label>
+            {preparing > 0 && (
+              <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-rose-200" role="status">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                Splitting {preparing} video{preparing === 1 ? "" : "s"}…
+              </p>
+            )}
             <input
               ref={fileInput}
               type="file"
@@ -437,8 +567,18 @@ export default function EpisodeUploadDialog({
                       <p className="text-xs text-neutral-400">
                         {formatBytes(d.file.size)}
                         {d.durationSeconds ? ` · ${formatLength(d.durationSeconds)}` : ""}
-                        {d.epSource === "next" && d.save.status !== "saved" && " · no number in the name, next free number used"}
+                        {d.epSource === "next" && !d.part && d.save.status !== "saved" && " · no number in the name, next free number used"}
+                        {d.epSource === "shifted" && !d.part && d.save.status !== "saved" && " · moved up to make room for the parts before it"}
                       </p>
+                      {d.part && (
+                        <p className="text-xs text-neutral-400">
+                          <span className="mr-1.5 inline-block rounded-md bg-rose-500/20 px-1.5 py-0.5 font-semibold text-rose-200">
+                            Part {d.part.number} of {d.part.count}
+                          </span>
+                          <span title={d.part.sourceName}>from {d.part.sourceName}</span>
+                        </p>
+                      )}
+                      {d.note && d.save.status !== "saved" && <p className="text-xs text-amber-200">{d.note}</p>}
                       <div className="flex flex-wrap items-center gap-3">
                         <label htmlFor={`${d.key}-title`} className="sr-only">
                           Title for episode {d.ep} (optional)

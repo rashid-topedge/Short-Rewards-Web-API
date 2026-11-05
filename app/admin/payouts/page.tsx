@@ -461,9 +461,9 @@ export default function AdminPayoutsPage() {
       )}
 
       {isProcessModalOpen && selectedRedemption && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <div className="w-full max-w-lg rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-[#1a2333] pb-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-2 sm:p-4">
+          <div className="max-h-[96dvh] sm:max-h-[92dvh] overflow-y-auto overscroll-contain w-full max-w-lg rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="sticky -top-6 z-10 -mx-6 -mt-6 px-6 pt-6 bg-[#0f141f] flex items-center justify-between border-b border-[#1a2333] pb-3">
               <div>
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
                   <CreditCard className="w-5 h-5 text-emerald-400" /> Process Payout #{selectedRedemption.id}
@@ -649,9 +649,9 @@ export default function AdminPayoutsPage() {
       )}
 
       {viewReceiptModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4">
-          <div className="w-full max-w-md rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-4 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-[#1a2333] pb-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-2 sm:p-4">
+          <div className="max-h-[96dvh] sm:max-h-[92dvh] overflow-y-auto overscroll-contain w-full max-w-md rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-4 animate-in fade-in zoom-in-95 duration-200">
+            <div className="sticky -top-6 z-10 -mx-6 -mt-6 px-6 pt-6 bg-[#0f141f] flex items-center justify-between border-b border-[#1a2333] pb-3">
               <div>
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
                   <CheckCircle2 className="w-5 h-5 text-emerald-400" /> Payout Receipt #{viewReceiptModal.id}
@@ -677,9 +677,9 @@ export default function AdminPayoutsPage() {
       )}
 
       {isAdmin && isSettingsModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <div className="w-full max-w-lg rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-[#1a2333] pb-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-2 sm:p-4">
+          <div className="max-h-[96dvh] sm:max-h-[92dvh] overflow-y-auto overscroll-contain w-full max-w-lg rounded-2xl bg-[#0f141f] border border-[#222c3f] shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="sticky -top-6 z-10 -mx-6 -mt-6 px-6 pt-6 bg-[#0f141f] flex items-center justify-between border-b border-[#1a2333] pb-3">
               <h2 className="text-base font-bold text-white flex items-center gap-2">
                 <Settings className="w-5 h-5 text-neutral-400" /> Coin-to-PKR Conversion & Cloudflare R2 / S3 Settings
               </h2>

@@ -73,6 +73,19 @@ In **Upload reels**, "Split videos longer than 3 minutes into 3-minute parts" is
 - MP4/MOV only. WebM/MKV and fragmented MP4 files upload whole, with a note on the card.
 - Videos 3:30 or shorter (3 minutes + the 30-second merge allowance) aren't split.
 
+### Drama episodes
+
+**Upload episodes** has the same toggle (on by default), but each part becomes its own **episode**
+with the next number, and each pays the episode reward:
+
+- `EP 01.mp4` (7 min) + `EP 02.mp4` → episodes 1, 2, 3 (the parts of EP 01) and 4 (EP 02). Files after a
+  split move up to make room; the card says "moved up to make room for the parts before it".
+- Parts are stored as `EP-01_part1.mp4`, `_part2`, … in the drama's folder, each with its own thumbnail.
+- Only numbers in this upload batch move. Episodes already saved on the drama are never renumbered
+  (that would change which episodes users were paid for); a clash shows "Episode N already exists"
+  with the option to replace it, and every number can still be edited before saving.
+- The app sees ordinary episodes; there are no new fields.
+
 ## File names in the bucket
 
 - Files keep their own name, cleaned for URLs: spaces and symbols become `-` ("My Clip (1).mp4" → `My-Clip-1.mp4`). Letters outside A–Z (e.g. Urdu) can't be used in the name; a name with none left becomes `video.mp4` / `file.jpg`.

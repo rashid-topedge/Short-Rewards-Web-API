@@ -236,7 +236,7 @@ async function initDb(): Promise<DbApi> {
 
 // Bump this whenever `statements` below changes. On a cold start we read one
 // row instead of re-running ~40 DDL statements against Turso.
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 
 async function createSchema(db: DbApi): Promise<void> {
   await db.run(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
@@ -555,6 +555,20 @@ async function createSchema(db: DbApi): Promise<void> {
       created_at REAL NOT NULL,
       PRIMARY KEY (user_id, drama_id, ep)
     )`,
+    // v16: one like per user per reel (so likes can't be repeated and the app can show "liked").
+    `CREATE TABLE IF NOT EXISTS user_reel_likes (
+      user_id TEXT NOT NULL,
+      reel_id INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, reel_id)
+    ) WITHOUT ROWID`,
+    // v16: fixed-window counters shared by every server instance (e.g. new accounts per IP).
+    `CREATE TABLE IF NOT EXISTS rate_limits (
+      bucket TEXT NOT NULL,
+      window_start INTEGER NOT NULL,
+      hits INTEGER NOT NULL,
+      PRIMARY KEY (bucket, window_start)
+    ) WITHOUT ROWID`,
   ];
 
   for (const sql of statements) {
@@ -1390,6 +1404,70 @@ export async function decrementReelLikes(reelId: number): Promise<void> {
   await db.run("UPDATE reels SET like_count = MAX(0, like_count - 1) WHERE reel_id = ?", [reelId]);
 }
 
+/**
+ * Signed-in like/unlike: counted once per user. Liking twice (or unliking a reel
+ * that isn't liked) changes nothing. Returns the user's like state and the new
+ * count, or null when the reel doesn't exist / isn't published.
+ */
+export async function setUserReelLike(
+  userId: string,
+  reelId: number,
+  like: boolean
+): Promise<{ liked: boolean; likeCount: number } | null> {
+  const db = await getDb();
+  return db.tx(async (tx) => {
+    const reel = (await tx.get("SELECT like_count FROM reels WHERE reel_id = ? AND is_published = 1", [reelId])) as
+      | { like_count: number | null }
+      | undefined;
+    if (!reel) return null;
+    const changed = like
+      ? await tx.run(
+          "INSERT INTO user_reel_likes (user_id, reel_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+          [userId, reelId, Date.now()]
+        )
+      : await tx.run("DELETE FROM user_reel_likes WHERE user_id = ? AND reel_id = ?", [userId, reelId]);
+    let likeCount = reel.like_count || 0;
+    if (changed.changes > 0) {
+      const row = (await tx.get(
+        like
+          ? "UPDATE reels SET like_count = like_count + 1 WHERE reel_id = ? RETURNING like_count"
+          : "UPDATE reels SET like_count = MAX(0, like_count - 1) WHERE reel_id = ? RETURNING like_count",
+        [reelId]
+      )) as { like_count: number } | undefined;
+      likeCount = row?.like_count ?? likeCount;
+    }
+    return { liked: like, likeCount };
+  });
+}
+
+/** Which of these reels the user has liked (one indexed lookup per page). */
+export async function likedReelIds(userId: string, reelIds: number[]): Promise<Set<number>> {
+  const ids = [...new Set(reelIds.filter((n) => Number.isInteger(n)))];
+  if (ids.length === 0) return new Set();
+  const db = await getDb();
+  const rows = (await db.all(
+    `SELECT reel_id FROM user_reel_likes WHERE user_id = ? AND reel_id IN (${ids.map(() => "?").join(",")})`,
+    [userId, ...ids]
+  )) as { reel_id: number }[];
+  return new Set(rows.map((r) => Number(r.reel_id)));
+}
+
+/** Which episodes of a drama the user has already been paid for. */
+export async function claimedEpisodeNumbers(userId: string, dramaId: number): Promise<Set<number>> {
+  const db = await getDb();
+  const rows = (await db.all("SELECT ep FROM user_episode_rewards WHERE user_id = ? AND drama_id = ?", [
+    userId,
+    dramaId,
+  ])) as { ep: number }[];
+  return new Set(rows.map((r) => Number(r.ep)));
+}
+
+/** Whether the user has been paid for this reel. */
+export async function hasClaimedReel(userId: string, reelId: number): Promise<boolean> {
+  const db = await getDb();
+  return Boolean(await db.get("SELECT 1 AS hit FROM user_reel_rewards WHERE user_id = ? AND reel_id = ?", [userId, reelId]));
+}
+
 // ==========================================
 // USER & ECONOMY QUERIES
 // ==========================================
@@ -1465,6 +1543,40 @@ export type RewardOptions = {
    */
   includeTransactions?: boolean;
 };
+
+/**
+ * Counts one hit for `bucket` in the current fixed window and says whether it is
+ * still within `max`. Stored in the database so every serverless instance shares it.
+ */
+export async function takeRateLimit(
+  bucket: string,
+  max: number,
+  windowMs: number
+): Promise<{ allowed: boolean; retryAfterSeconds: number }> {
+  const now = Date.now();
+  const windowStart = now - (now % windowMs);
+  const db = await getDb();
+  const row = (await db.get(
+    `INSERT INTO rate_limits (bucket, window_start, hits) VALUES (?, ?, 1)
+     ON CONFLICT(bucket, window_start) DO UPDATE SET hits = hits + 1
+     RETURNING hits`,
+    [bucket, windowStart]
+  )) as { hits: number } | undefined;
+  // Old windows are useless; clear them now and then.
+  if (Math.random() < 0.02) {
+    db.run("DELETE FROM rate_limits WHERE window_start < ?", [now - 2 * 86_400_000]).catch(() => {});
+  }
+  const hits = Number(row?.hits ?? 1);
+  return { allowed: hits <= max, retryAfterSeconds: Math.ceil((windowStart + windowMs - now) / 1000) };
+}
+
+/** Profile without the recent transactions (one indexed read); creates the account if missing. */
+export async function getUserProfileLite(userId: string): Promise<UserProfile> {
+  const db = await getDb();
+  const row = (await db.get("SELECT * FROM users WHERE user_id = ?", [userId])) as UserRow | undefined;
+  if (!row) return getOrCreateUser(userId);
+  return buildUserProfile(row, [], getTodayIso());
+}
 
 /**
  * Builds the profile returned after a write. When the write already returned
@@ -3520,6 +3632,7 @@ export async function deleteUserAdmin(userId: string): Promise<boolean> {
     await tx.run("DELETE FROM user_refresh_tokens WHERE user_id = ?", [userId]);
     await tx.run("DELETE FROM reward_claim_keys WHERE user_id = ?", [userId]);
     await tx.run("DELETE FROM user_reel_rewards WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM user_reel_likes WHERE user_id = ?", [userId]);
     await tx.run("DELETE FROM user_daily_reward_counts WHERE user_id = ?", [userId]);
     await tx.run("DELETE FROM users WHERE user_id = ?", [userId]);
   });

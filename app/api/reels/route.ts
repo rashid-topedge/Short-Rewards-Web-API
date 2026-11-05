@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getRewardConfig, listReelParts, listReels } from "@/lib/db";
+import { getRewardConfig, likedReelIds, listReelParts, listReels } from "@/lib/db";
 import { getUrlSigner } from "@/lib/b2";
 import { reelCoinsForDuration } from "@/lib/rewardConfig";
 import { authError, optionalUser } from "@/lib/userAuth";
@@ -11,6 +11,7 @@ import { authError, optionalUser } from "@/lib/userAuth";
  * user hasn't earned coins for come first, then the rest (each item has
  * `rewardClaimed`). Add `personal=0` to get the plain feed while signed in.
  * Every item has `rewardCoins`: what it pays by length (with a watch token).
+ * Signed in, every item also has `liked` (this user's like, see POST /api/reels/:id).
  * Pass `nextCursor` back unchanged; it carries which part of the feed you're in.
  *
  * GET /api/reels?partGroup=<item.part.group> → all parts of a video that was
@@ -55,10 +56,10 @@ export async function GET(req: NextRequest) {
       }),
       getRewardConfig(),
     ]);
-    const sign = await getUrlSigner(
-      "reels",
-      data.items.flatMap((r) => [r.videoUrl, r.thumbnailUrl || ""])
-    );
+    const [sign, liked] = await Promise.all([
+      getUrlSigner("reels", data.items.flatMap((r) => [r.videoUrl, r.thumbnailUrl || ""])),
+      userId ? likedReelIds(userId, data.items.map((r) => r.reelId)) : Promise.resolve(null),
+    ]);
 
     return NextResponse.json(
       {
@@ -69,6 +70,7 @@ export async function GET(req: NextRequest) {
           videoUrl: sign(reel.videoUrl),
           thumbnailUrl: reel.thumbnailUrl ? sign(reel.thumbnailUrl) : reel.thumbnailUrl,
           rewardCoins: reelCoinsForDuration(rewards.reel, reel.durationSeconds),
+          ...(liked ? { liked: liked.has(reel.reelId) } : {}),
         })),
       },
       // Per-user order (and short-lived signed links): never cache in shared caches.

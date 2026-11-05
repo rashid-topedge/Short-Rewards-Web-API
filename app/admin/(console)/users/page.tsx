@@ -282,9 +282,9 @@ export default function AdminUsersPage() {
 
       {/* Edit User Modal */}
       {editUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="w-full max-w-md bg-[#0F1420] border border-white/10 rounded-2xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/80 backdrop-blur-sm">
+          <div className="max-h-[96dvh] sm:max-h-[92dvh] overflow-y-auto overscroll-contain w-full max-w-md bg-[#0F1420] border border-white/10 rounded-2xl p-6 shadow-2xl space-y-4">
+            <div className="sticky -top-6 z-10 -mx-6 -mt-6 px-6 pt-6 bg-[#0F1420] flex items-center justify-between border-b border-white/10 pb-3">
               <div>
                 <h2 className="text-base font-bold text-white">Edit User Profile</h2>
                 <p className="text-[11px] text-slate-400 font-mono">{editUser.userId}</p>
@@ -354,9 +354,9 @@ export default function AdminUsersPage() {
 
       {/* User Transaction History Modal */}
       {historyUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="w-full max-w-xl bg-[#0F1420] border border-white/10 rounded-2xl p-6 shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/80 backdrop-blur-sm">
+          <div className="max-h-[96dvh] sm:max-h-[92dvh] overflow-y-auto overscroll-contain w-full max-w-xl bg-[#0F1420] border border-white/10 rounded-2xl p-6 shadow-2xl space-y-4">
+            <div className="sticky -top-6 z-10 -mx-6 -mt-6 px-6 pt-6 bg-[#0F1420] flex items-center justify-between border-b border-white/10 pb-3">
               <div>
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
                   <History className="w-5 h-5 text-emerald-400" />

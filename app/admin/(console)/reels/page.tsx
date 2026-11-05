@@ -859,7 +859,7 @@ function PreviewDialog({ reel, onClose }: { reel: AdminReel | null; onClose: () 
         e.preventDefault();
         onClose();
       }}
-      className="m-auto w-full max-w-sm bg-transparent p-4 backdrop:bg-black/90"
+      className="m-auto max-h-[100dvh] w-full max-w-sm overflow-y-auto bg-transparent p-2 backdrop:bg-black/90 sm:p-4"
     >
       {reel && (
         <div className="space-y-2 rounded-2xl border border-[#2b3850] bg-black p-2">
@@ -881,7 +881,7 @@ function PreviewDialog({ reel, onClose }: { reel: AdminReel | null; onClose: () 
             controls
             autoPlay
             playsInline
-            className="aspect-[9/16] w-full rounded-xl bg-black object-contain"
+            className="mx-auto aspect-[9/16] max-h-[80dvh] w-auto max-w-full rounded-xl bg-black object-contain"
           />
         </div>
       )}
@@ -1080,7 +1080,7 @@ function ReelEditDialog({
             </button>
           </div>
 
-          <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-5 py-5">
             {error && (
               <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2.5 text-sm text-rose-100">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> {error}
@@ -1427,7 +1427,7 @@ function ReviewDialog({
             </button>
           </div>
 
-          <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-5 py-5">
             {error && (
               <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2.5 text-sm text-rose-100">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> {error}
