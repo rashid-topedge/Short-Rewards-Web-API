@@ -10,7 +10,6 @@ import {
   Coins,
   CreditCard,
   LogOut,
-  ExternalLink,
   ShieldCheck,
   Flame,
   CloudCog,
@@ -114,15 +113,6 @@ export default async function AdminLayout({
           </div>
 
           <div className="flex items-center gap-2 pt-1">
-            <Link
-              href="/"
-              target="_blank"
-              className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-medium text-[#94a3b8] hover:text-white hover:bg-[#161c28] transition"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              Public App
-            </Link>
-
             <form action="/api/admin/logout" method="POST" className="flex-1">
               <button
                 type="submit"

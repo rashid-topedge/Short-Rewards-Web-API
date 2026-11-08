@@ -1,11 +1,6 @@
-import { Suspense } from "react";
+import { redirect } from "next/navigation";
 
-import { Catalog } from "@/components/Catalog";
-
+/** There is no public website any more: the root address shows the privacy policy. */
 export default function Home() {
-  return (
-    <Suspense fallback={<p className="px-6 py-8 text-sm text-zinc-500">Loading catalog…</p>}>
-      <Catalog />
-    </Suspense>
-  );
+  redirect("/privacy");
 }
