@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 // ---- Fill these in before publishing (they appear on the page) ----
-const APP_NAME = "DramaFlix";
-const DEVELOPER_NAME = "[Your name or company, as shown on Google Play]";
-const CONTACT_EMAIL = "[your-support-email@example.com]";
+const APP_NAME = "Rayz Clip";
+const DEVELOPER_NAME = "Online Math Learning";
+const CONTACT_EMAILS = ["yusraraaheel@gmail.com", "rashid7bilal@gmail.com"];
 const EFFECTIVE_DATE = "8 November 2026";
 // --------------------------------------------------------------------
 
@@ -37,7 +37,22 @@ const TOC: [string, string][] = [
 ];
 
 export default function PrivacyPage() {
-  const mail = <a href={`mailto:${CONTACT_EMAIL}`} className="text-violet-300 underline underline-offset-4 hover:text-violet-200">{CONTACT_EMAIL}</a>;
+  const link = (e: string) => (
+    <a key={e} href={`mailto:${e}`} className="text-violet-300 underline underline-offset-4 hover:text-violet-200">
+      {e}
+    </a>
+  );
+  // "a or b" in sentences.
+  const mail = (
+    <>
+      {CONTACT_EMAILS.map((e, i) => (
+        <span key={e}>
+          {i > 0 && " or "}
+          {link(e)}
+        </span>
+      ))}
+    </>
+  );
   return (
     <article className="mx-auto w-full max-w-3xl px-4 py-12 sm:px-6">
       <h1 className="text-3xl font-bold text-white sm:text-4xl">Privacy Policy</h1>
@@ -45,7 +60,7 @@ export default function PrivacyPage() {
       <p className="mt-6 text-[15px] leading-relaxed text-zinc-300">
         This policy explains what information the {APP_NAME} Android app and website (&ldquo;{APP_NAME}&rdquo;,
         &ldquo;we&rdquo;, &ldquo;us&rdquo;) collect when you watch short dramas and reels, earn coins and request
-        payouts, how we use that information, and the choices you have. {APP_NAME} is operated by {DEVELOPER_NAME}.
+        payouts, how we use that information, and the choices you have. {APP_NAME} is published on Google Play by {DEVELOPER_NAME}.
       </p>
 
       <nav aria-label="Contents" className="mt-8 rounded-2xl border border-white/10 bg-zinc-900/70 p-5">
@@ -147,8 +162,9 @@ export default function PrivacyPage() {
         </Section>
 
         <Section id="contact" title="11. Contact us">
-          <p>Questions or requests about your privacy: {mail}</p>
-          <p>{DEVELOPER_NAME}</p>
+          <p>Questions or requests about your privacy, or support with the app, email us at:</p>
+          <ul className="list-disc space-y-1 pl-5">{CONTACT_EMAILS.map((e) => <li key={e}>{link(e)}</li>)}</ul>
+          <p>{DEVELOPER_NAME} (publisher of {APP_NAME} on Google Play)</p>
         </Section>
       </div>
     </article>

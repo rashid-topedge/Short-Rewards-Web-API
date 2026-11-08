@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import DeleteAccountClient from "./DeleteAccountClient";
 
 export const metadata: Metadata = {
-  title: "Delete your account - DramaFlix",
-  description: "Request deletion of your DramaFlix account and its data.",
+  title: "Delete your account - Rayz Clip",
+  description: "Request deletion of your Rayz Clip account and its data.",
 };
 
 export const dynamic = "force-dynamic";
@@ -17,7 +17,7 @@ export default function DeleteAccountPage() {
     <div className="mx-auto w-full max-w-2xl px-4 py-12 sm:px-6">
       <h1 className="text-2xl font-bold text-white sm:text-3xl">Delete your account</h1>
       <p className="mt-3 text-zinc-300">
-        You can ask us to delete your DramaFlix account and the data linked to it. The account is signed out
+        You can ask us to delete your Rayz Clip account and the data linked to it. The account is signed out
         right away and deleted for good after 7 days. Until then you can change your mind.
       </p>
 
@@ -59,6 +59,22 @@ export default function DeleteAccountPage() {
           </a>
           .
         </p>
+      </section>
+
+      <section className="mt-4 rounded-2xl border border-white/10 bg-zinc-900/70 p-5 text-sm text-zinc-300 sm:p-6">
+        <h2 className="text-lg font-semibold text-white">Need help?</h2>
+        <p className="mt-2">
+          Can&apos;t sign in, or using the app as a guest? Email us and we&apos;ll help:{" "}
+          <a href="mailto:yusraraaheel@gmail.com" className="text-violet-300 underline underline-offset-4 hover:text-violet-200">
+            yusraraaheel@gmail.com
+          </a>{" "}
+          or{" "}
+          <a href="mailto:rashid7bilal@gmail.com" className="text-violet-300 underline underline-offset-4 hover:text-violet-200">
+            rashid7bilal@gmail.com
+          </a>
+          .
+        </p>
+        <p className="mt-2 text-zinc-500">Rayz Clip is published on Google Play by Online Math Learning.</p>
       </section>
     </div>
   );
