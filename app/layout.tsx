@@ -51,6 +51,10 @@ export default function RootLayout({
               <span>•</span>
               <span>Ultra-fast streaming & short plays</span>
             </div>
+            <nav aria-label="Legal" className="flex items-center gap-4">
+              <a href="/privacy" className="hover:text-zinc-300">Privacy Policy</a>
+              <a href="/delete-account" className="hover:text-zinc-300">Delete account</a>
+            </nav>
             <p>© {new Date().getFullYear()} DramaFlix. All rights reserved.</p>
           </div>
         </footer>

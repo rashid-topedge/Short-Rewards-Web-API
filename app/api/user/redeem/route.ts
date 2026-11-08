@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createRedemptionRequest, isGoogleLinked, listUserRedemptions } from "@/lib/db";
+import { createRedemptionRequest, getDeletionStatus, isGoogleLinked, listUserRedemptions } from "@/lib/db";
 import { authError, requireUser } from "@/lib/userAuth";
 import { getUrlSigner } from "@/lib/b2";
 
@@ -29,6 +29,15 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const auth = await requireUser(req, body?.userId);
     if (!auth.ok) return auth.response;
+
+    // No new payouts while the account is scheduled for deletion.
+    if ((await getDeletionStatus(auth.userId))?.deletionDueAt) {
+      return authError(
+        409,
+        "ACCOUNT_DELETION_PENDING",
+        "Your account is scheduled for deletion. Keep your account first to redeem coins."
+      );
+    }
 
     // Optional anti-fraud rule: only accounts with a linked Google account can cash out.
     if (process.env.REDEEM_REQUIRE_GOOGLE === "true" && !(await isGoogleLinked(auth.userId))) {

@@ -1,0 +1,3 @@
+{
+  "crons": [{ "path": "/api/cron/purge-accounts", "schedule": "17 22 * * *" }]
+}

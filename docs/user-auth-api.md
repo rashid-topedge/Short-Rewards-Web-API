@@ -132,6 +132,31 @@ GET /api/user/transactions?limit=30            Authorization: Bearer <accessToke
 GET /api/user/transactions?limit=30&cursor=<nextCursor>   // next page; nextCursor is null on the last page
 ```
 
+## Delete account
+
+Google Play requires an in-app way to delete the account, and a web link for the Play Console.
+
+```
+POST   /api/user/account/delete   { "confirm": true }    Authorization: Bearer <accessToken>
+→ 200 { success, message, deletionRequestedAt, deletionDueAt }
+→ 409 PAYOUT_PENDING              // a payout is waiting: try again once it's paid or rejected
+GET    /api/user/account/delete   → { deletionRequestedAt, deletionDueAt }   (null = not requested)
+DELETE /api/user/account/delete   → keeps the account (cancels the request)
+```
+- After the request the account is **signed out on every device** (refresh tokens revoked) and is
+  deleted for good 7 days later (`deletionDueAt`, ms). The app should sign out locally right away.
+- If the user signs in again before then, the profile has `deletionDueAt` set: show
+  "Your account will be deleted on …" with a **Keep my account** button that calls `DELETE`.
+  Signing in alone does not cancel it.
+- While a deletion is scheduled, `POST /api/user/redeem` returns `409 ACCOUNT_DELETION_PENDING`.
+- Deleted: the account, coins, coin history, streak, rewards, likes, referral details, Google
+  link, sessions and unpaid payout requests. Paid payouts are kept for accounting (amount, date,
+  receipt) with the name and account number removed.
+- Web: **/delete-account** (put this link in Play Console → App content → Data safety → Delete
+  account URL). The person signs in with Google; only accounts that linked Google can be found
+  there. It calls `POST /api/user/account/delete-web { idToken, action: "status"|"request"|"cancel" }`.
+- The deletion runs daily at 03:17 PKT (`/api/cron/purge-accounts`, set in `vercel.json`).
+
 ## Error format
 All auth errors are `{ "error": "<human message>", "code": "<CODE>" }`.
 
@@ -140,6 +165,8 @@ All auth errors are `{ "error": "<human message>", "code": "<CODE>" }`.
 - `GOOGLE_OAUTH_CLIENT_IDS`: the Web client ID (comma-separate several if needed).
 - `USER_AUTH_ALLOW_LEGACY=true` during the app rollout; set it to `false` once all users are on the new version.
 - `REDEEM_REQUIRE_GOOGLE`: optional, `false` by default.
+- `CRON_SECRET`: at least 16 random characters. Vercel Cron sends it to the daily
+  account-deletion job (`vercel.json`); without it the job refuses to run.
 - `SIGNUP_LIMIT_PER_HOUR`: new anonymous accounts allowed per IP per hour (default 30, `0` = off).
   Mobile networks share IPs, so don't set it too low.
 

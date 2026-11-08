@@ -145,6 +145,8 @@ interface UserRow {
   referral_status?: string | null;
   referral_count?: number;
   referral_coins?: number;
+  deletion_requested_at?: number | null;
+  deletion_due_at?: number | null;
 }
 
 interface TransactionRow {
@@ -236,7 +238,7 @@ async function initDb(): Promise<DbApi> {
 
 // Bump this whenever `statements` below changes. On a cold start we read one
 // row instead of re-running ~40 DDL statements against Turso.
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 
 async function createSchema(db: DbApi): Promise<void> {
   await db.run(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
@@ -569,6 +571,10 @@ async function createSchema(db: DbApi): Promise<void> {
       hits INTEGER NOT NULL,
       PRIMARY KEY (bucket, window_start)
     ) WITHOUT ROWID`,
+    // v17: account deletion requested by the user; deleted for good after deletion_due_at.
+    `ALTER TABLE users ADD COLUMN deletion_requested_at INTEGER`,
+    `ALTER TABLE users ADD COLUMN deletion_due_at INTEGER`,
+    `CREATE INDEX IF NOT EXISTS idx_users_deletion_due ON users (deletion_due_at) WHERE deletion_due_at IS NOT NULL`,
   ];
 
   for (const sql of statements) {
@@ -1773,6 +1779,7 @@ function buildUserProfile(userRow: UserRow, txRows: unknown[], todayIso: string)
     nextCheckInReward: nextReward,
     streakSchedule,
     transactions: mapProfileTransactions(txRows),
+    deletionDueAt: userRow.deletion_due_at ?? null,
   };
 }
 
@@ -3620,6 +3627,143 @@ export async function updateUserCoinsAdmin(
   });
 
   return getOrCreateUser(userId);
+}
+
+// ------------------------------------------------------------------
+// Account deletion requested by the user (Google Play requirement)
+// ------------------------------------------------------------------
+
+/** Days between the request and the actual deletion; the user can cancel until then. */
+export const ACCOUNT_DELETION_GRACE_DAYS = 7;
+
+export type DeletionStatus = { deletionRequestedAt: number | null; deletionDueAt: number | null };
+
+export async function getDeletionStatus(userId: string): Promise<DeletionStatus | null> {
+  const db = await getDb();
+  const row = (await db.get("SELECT deletion_requested_at, deletion_due_at FROM users WHERE user_id = ?", [userId])) as
+    | { deletion_requested_at: number | null; deletion_due_at: number | null }
+    | undefined;
+  if (!row) return null;
+  return { deletionRequestedAt: row.deletion_requested_at ?? null, deletionDueAt: row.deletion_due_at ?? null };
+}
+
+/**
+ * Schedules the account for deletion. Refused while a payout is still waiting
+ * (it has to be paid or rejected first). Signs the account out everywhere.
+ * Asking again keeps the first date.
+ */
+export async function requestAccountDeletion(
+  userId: string
+): Promise<{ ok: true; status: DeletionStatus } | { ok: false; reason: "not_found" | "payout_pending" }> {
+  const db = await getDb();
+  const now = Date.now();
+  const due = now + ACCOUNT_DELETION_GRACE_DAYS * 86_400_000;
+  const result = await db.tx(async (tx) => {
+    const user = await tx.get("SELECT user_id FROM users WHERE user_id = ?", [userId]);
+    if (!user) return { ok: false as const, reason: "not_found" as const };
+    const pending = await tx.get("SELECT 1 AS hit FROM redemption_requests WHERE user_id = ? AND status = 'PENDING' LIMIT 1", [userId]);
+    if (pending) return { ok: false as const, reason: "payout_pending" as const };
+    const row = (await tx.get(
+      `UPDATE users SET deletion_requested_at = COALESCE(deletion_requested_at, ?),
+         deletion_due_at = COALESCE(deletion_due_at, ?), updated_at = ?
+       WHERE user_id = ? RETURNING deletion_requested_at, deletion_due_at`,
+      [now, due, now, userId]
+    )) as { deletion_requested_at: number; deletion_due_at: number };
+    await tx.run("UPDATE user_refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", [now, userId]);
+    return {
+      ok: true as const,
+      status: { deletionRequestedAt: row.deletion_requested_at, deletionDueAt: row.deletion_due_at },
+    };
+  });
+  return result;
+}
+
+/** Keeps the account. Returns false if there was no such account. */
+export async function cancelAccountDeletion(userId: string): Promise<boolean> {
+  const db = await getDb();
+  const res = await db.run(
+    "UPDATE users SET deletion_requested_at = NULL, deletion_due_at = NULL, updated_at = ? WHERE user_id = ?",
+    [Date.now(), userId]
+  );
+  return res.changes > 0;
+}
+
+/** The app account linked to this Google account, without creating one. */
+export async function findUserIdByGoogleSub(googleSub: string): Promise<string | null> {
+  const db = await getDb();
+  const row = (await db.get("SELECT user_id FROM users WHERE google_sub = ?", [googleSub])) as { user_id: string } | undefined;
+  return row?.user_id ?? null;
+}
+
+/**
+ * Owner of paid payouts kept after their accounts were deleted. "#" can't be in
+ * a real user id (see USER_ID_PATTERN), so no app can sign in as it.
+ */
+export const DELETED_ACCOUNTS_USER_ID = "#deleted";
+
+/**
+ * Deletes the account and its data. Paid payouts are kept for the accounts
+ * (amount, date, receipt) with the bank/wallet details removed and moved to
+ * DELETED_ACCOUNTS_USER_ID; everything else about the user is deleted.
+ */
+async function purgeUserData(userId: string): Promise<void> {
+  invalidateCounts("users");
+  const db = await getDb();
+  await db.tx(async (tx) => {
+    const now = Date.now();
+    const paid = await tx.get("SELECT 1 AS hit FROM redemption_requests WHERE user_id = ? AND status = 'PAID' LIMIT 1", [userId]);
+    if (paid) {
+      await tx.run(
+        `INSERT INTO users (user_id, coins, streak_day, last_check_in_date, created_at, updated_at)
+         VALUES (?, 0, 0, NULL, ?, ?) ON CONFLICT(user_id) DO NOTHING`,
+        [DELETED_ACCOUNTS_USER_ID, now, now]
+      );
+      await tx.run(
+        `UPDATE redemption_requests
+         SET user_id = ?, account_title = '[deleted]', account_number = '[deleted]', bank_name = NULL
+         WHERE user_id = ? AND status = 'PAID'`,
+        [DELETED_ACCOUNTS_USER_ID, userId]
+      );
+    }
+    await tx.run("DELETE FROM coin_transactions WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM redemption_requests WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM user_episode_rewards WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM user_refresh_tokens WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM reward_claim_keys WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM user_reel_rewards WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM user_reel_likes WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM user_daily_reward_counts WHERE user_id = ?", [userId]);
+    await tx.run("DELETE FROM referrals WHERE referee_user_id = ?", [userId]);
+    await tx.run("DELETE FROM users WHERE user_id = ?", [userId]);
+  });
+}
+
+/**
+ * Deletes accounts whose waiting period is over (run daily by the cron job).
+ * Accounts with a payout still waiting are skipped until it's settled.
+ */
+export async function purgeDueAccountDeletions(limit = 100): Promise<{ deleted: string[]; waitingForPayout: string[] }> {
+  const db = await getDb();
+  const rows = (await db.all(
+    `SELECT u.user_id,
+       EXISTS (SELECT 1 FROM redemption_requests r WHERE r.user_id = u.user_id AND r.status = 'PENDING') AS pending
+     FROM users u WHERE u.deletion_due_at IS NOT NULL AND u.deletion_due_at <= ?
+     ORDER BY u.deletion_due_at LIMIT ?`,
+    [Date.now(), limit]
+  )) as { user_id: string; pending: number }[];
+  // Abuse-prevention counters (keyed by IP) older than 2 days aren't needed any more.
+  await db.run("DELETE FROM rate_limits WHERE window_start < ?", [Date.now() - 2 * 86_400_000]);
+  const deleted: string[] = [];
+  const waitingForPayout: string[] = [];
+  for (const r of rows) {
+    if (Number(r.pending)) {
+      waitingForPayout.push(r.user_id);
+      continue;
+    }
+    await purgeUserData(r.user_id);
+    deleted.push(r.user_id);
+  }
+  return { deleted, waitingForPayout };
 }
 
 export async function deleteUserAdmin(userId: string): Promise<boolean> {

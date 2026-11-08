@@ -188,6 +188,8 @@ export type UserProfile = {
   nextCheckInReward: number;
   streakSchedule: StreakDayInfo[];
   transactions: CoinTransaction[];
+  /** Set when the user asked to delete the account: it is deleted for good at this time (ms). */
+  deletionDueAt?: number | null;
 };
 
 /** Set on claim responses that didn't grant coins (or replayed an earlier claim). */
