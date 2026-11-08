@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { checkReferralQualification, getOrCreateUser, resolveFirebaseUser } from "@/lib/db";
+import { checkReferralQualification, getOrCreateUser, logActivity, resolveFirebaseUser } from "@/lib/db";
 import { FirebaseTokenError, verifyFirebaseIdToken } from "@/lib/firebaseAuth";
 import { authError, isValidUserId, issueSession } from "@/lib/userAuth";
 
@@ -20,7 +20,9 @@ import { authError, isValidUserId, issueSession } from "@/lib/userAuth";
  *
  * 401 FIREBASE_TOKEN_INVALID   bad / expired token, or userId ≠ token uid
  * 409 ACCOUNT_ALREADY_CLAIMED  legacyUserId already belongs to a signed-in account
- * 409 GOOGLE_ACCOUNT_IN_USE    the linked Google account already has another app account
+ * 409 GOOGLE_ACCOUNT_IN_USE    (no longer returned: signing in with a Google account that
+ *                              already has an app account opens that account; a guest
+ *                              account the phone was using is left as it is)
  */
 export async function POST(req: NextRequest) {
   try {
@@ -72,6 +74,23 @@ export async function POST(req: NextRequest) {
         "GOOGLE_ACCOUNT_IN_USE",
         "This Google account is already linked to another account. Sign in with Google to switch to it."
       );
+    }
+
+    // The Google account's own app account was re-attached to this Firebase user: record it.
+    if (result.recovered) {
+      const r = result.recovered;
+      await logActivity(
+        { actorId: "system", displayName: "Sign-in", role: "system" },
+        {
+          action: "user.signin_recovered",
+          entityType: "user",
+          entityId: result.userId,
+          summary: r.detachedUserId
+            ? `Signed in with Google: switched from account ${r.detachedUserId} to the Google account's own account`
+            : "Signed in with Google: account re-attached to a new Firebase user",
+          details: { previousFirebaseUid: r.previousFirebaseUid, firebaseUid: identity.uid, detachedUserId: r.detachedUserId },
+        }
+      ).catch((err) => console.error("Activity log failed:", err));
     }
 
     // Linking Google may complete a pending referral.

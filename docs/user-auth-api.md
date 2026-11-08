@@ -53,6 +53,20 @@ POST /api/user/link-google        Authorization: Bearer <accessToken>
 → 401 GOOGLE_TOKEN_INVALID
 ```
 
+### Firebase sign-in (guest and Google)
+```
+POST /api/user/firebase-session
+{ "firebaseIdToken": "<Firebase ID token>", "userId": "<Firebase UID>", "legacyUserId"?: "<pre-auth id>" }
+→ 200 { ...profile, accessToken, refreshToken, ..., created }
+```
+- **The Google account decides.** If the token carries a Google account that already has an app
+  account, that account is returned, even if the phone was using a guest account or the Firebase
+  user was deleted and re-created. The app should then show that account's coins.
+- The guest account the phone was using is left as it is (coins are **not** moved over). Before
+  linking Google on a guest with earned coins, warn: "You'll switch to your Google account."
+- Each switch is recorded in the admin activity log (`user.signin_recovered`).
+- `409 GOOGLE_ACCOUNT_IN_USE` is no longer returned by this endpoint.
+
 ### Sign in with Google (reinstall, new phone, or switching accounts)
 ```
 POST /api/user/login-google

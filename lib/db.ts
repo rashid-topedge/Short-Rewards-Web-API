@@ -3966,20 +3966,35 @@ export async function findOrCreateUserForGoogle(
 }
 
 export type ResolveFirebaseUserResult =
-  | { status: "ok"; userId: string; created: boolean }
+  | { status: "ok"; userId: string; created: boolean; recovered?: FirebaseRecovery }
   /** legacyUserId already has a session or a Firebase user: recover it with Google instead. */
   | { status: "legacy_claimed" }
-  /** The Firebase user linked a Google account that already belongs to another app account. */
+  /** Kept for the app's error handling; no longer returned now that the Google account decides. */
   | { status: "google_in_use" };
+
+export type FirebaseRecovery = {
+  /** Firebase UID the account had before (now replaced by the signed-in one). */
+  previousFirebaseUid: string | null;
+  /** Account that held the signed-in UID before and was left behind (e.g. a guest). */
+  detachedUserId: string | null;
+};
 
 /**
  * Maps a *verified* Firebase identity to an app account. Atomic.
  *
  * Coins stay safe because accounts are keyed by the Firebase UID, which
- * Firebase keeps the same when a guest links Google. Nothing is ever merged:
- * 1. an account already bound to this UID → that account (Google fields updated);
- * 2. else, the account already linked to this Google account (created by the
- *    earlier /login-google flow) → bind the UID to it;
+ * Firebase keeps the same when a guest links Google. Nothing is ever merged.
+ *
+ * The Google account decides. In one Firebase project a Google account belongs
+ * to exactly one Firebase user, and the token proving it is signed by Firebase.
+ * So when this token carries a Google account that an app account already has,
+ * that app account is this person's, and any other Firebase UID stored on it is
+ * stale (the Firebase user was deleted/re-created, or the project changed).
+ * The UID is moved to that account (`recovered` says what moved); a guest
+ * account that held the UID is left as it is, with its own coins.
+ *
+ * 1. the account already linked to this Google account → bind the UID to it;
+ * 2. else, an account already bound to this UID → that account (Google fields set);
  * 3. else, `legacyUserId` from a pre-auth app install that has never been
  *    claimed → bind the UID to it, once;
  * 4. else → create a new account whose user_id is the UID.
@@ -4013,31 +4028,42 @@ export async function resolveFirebaseUser(input: {
       return true;
     };
 
-    // 1. Already bound to this Firebase user.
     const bound = (await tx.get("SELECT user_id FROM users WHERE firebase_uid = ?", [uid])) as
       | { user_id: string }
       | undefined;
-    if (bound) {
-      if (!(await applyGoogle(bound.user_id))) return { status: "google_in_use" as const };
-      return { status: "ok" as const, userId: bound.user_id, created: false };
-    }
 
-    // 2. Account previously linked to this Google account (pre-Firebase sign-in).
+    // 1. The account that has this Google account (see above: the Google account decides).
     if (googleSub) {
       const byGoogle = (await tx.get(
         "SELECT user_id, firebase_uid FROM users WHERE google_sub = ?",
         [googleSub]
       )) as { user_id: string; firebase_uid: string | null } | undefined;
-      if (byGoogle && !byGoogle.firebase_uid) {
+      if (byGoogle) {
+        let recovered: FirebaseRecovery | undefined;
+        if (byGoogle.firebase_uid !== uid) {
+          const detached = bound && bound.user_id !== byGoogle.user_id ? bound.user_id : null;
+          // One UID per account (unique index): release it from the other account first.
+          if (detached) {
+            await tx.run("UPDATE users SET firebase_uid = NULL, updated_at = ? WHERE user_id = ?", [now, detached]);
+          }
+          if (detached || byGoogle.firebase_uid) {
+            recovered = { previousFirebaseUid: byGoogle.firebase_uid, detachedUserId: detached };
+          }
+        }
         await tx.run(
           `UPDATE users SET firebase_uid = ?, google_email = COALESCE(?, google_email),
              auth_claimed_at = COALESCE(auth_claimed_at, ?), updated_at = ?
            WHERE user_id = ?`,
           [uid, googleEmail, now, now, byGoogle.user_id]
         );
-        return { status: "ok" as const, userId: byGoogle.user_id, created: false };
+        return { status: "ok" as const, userId: byGoogle.user_id, created: false, ...(recovered ? { recovered } : {}) };
       }
-      if (byGoogle) return { status: "google_in_use" as const };
+    }
+
+    // 2. Already bound to this Firebase user (no account has the Google account yet).
+    if (bound) {
+      if (!(await applyGoogle(bound.user_id))) return { status: "google_in_use" as const };
+      return { status: "ok" as const, userId: bound.user_id, created: false };
     }
 
     // 3. Pre-auth install keeping its account (works once, like /sync's userId).
