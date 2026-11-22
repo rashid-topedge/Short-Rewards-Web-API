@@ -291,8 +291,11 @@ thumbnails are in a private bucket, so every link in these responses is **signed
 given, don't build URLs yourself, and don't keep links longer than a day (fetch again instead).
 
 ```
-GET /api/dramas?limit=24[&q=…][&cursor=…]     → { items: [ { dramaId, slug, title, cover, playCount,
-                                                  episodeCount, latestEpisodeLabel } ], nextCursor }
+GET /api/dramas?limit=24[&q=…][&tag=…][&cursor=…]
+                                              → { items: [ { dramaId, slug, title, cover, playCount,
+                                                  episodeCount, latestEpisodeLabel, tags } ], nextCursor }
+    tags: always an array (same as the detail endpoint), [] when the drama has none.
+    tag:  optional, only dramas with that tag (case-insensitive); works with q and cursor.
 GET /api/dramas/{dramaId}                     → { dramaId, slug, title, cover, synopsis, tags, playCount,
                                                   likeCount, episodeCount, latestEpisodeLabel }
 GET /api/dramas/{dramaId}/episodes            → { dramaId, episodes: [ { ep, title, playUrl, thumbnailUrl,

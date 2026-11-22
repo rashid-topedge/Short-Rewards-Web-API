@@ -7,6 +7,8 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const limit = Number(url.searchParams.get("limit") ?? "24");
   const query = url.searchParams.get("q") ?? "";
+  // Optional: only dramas with this tag (case-insensitive). Empty = no filter.
+  const tag = url.searchParams.get("tag")?.trim() || undefined;
   const cursorParam = url.searchParams.get("cursor");
   const cursor = cursorParam ? Number(cursorParam) : undefined;
 
@@ -15,6 +17,7 @@ export async function GET(request: Request) {
       limit: Number.isFinite(limit) ? limit : 24,
       query,
       cursor: isNaN(cursor as number) ? undefined : cursor,
+      tag,
     });
     // Same for every viewer; signed links last at least a day, so a short CDN cache is safe.
     return Response.json({ ...result, items: await signDramaCovers(result.items) }, { headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" } });

@@ -83,6 +83,7 @@ interface DramaListRow {
   is_published: number;
   created_by_id?: string | null;
   created_by_name?: string | null;
+  tags_json?: string | null;
 }
 
 interface DramaDetailRow extends DramaListRow {
@@ -238,7 +239,7 @@ async function initDb(): Promise<DbApi> {
 
 // Bump this whenever `statements` below changes. On a cold start we read one
 // row instead of re-running ~40 DDL statements against Turso.
-const SCHEMA_VERSION = 17;
+const SCHEMA_VERSION = 18;
 
 async function createSchema(db: DbApi): Promise<void> {
   await db.run(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
@@ -575,6 +576,32 @@ async function createSchema(db: DbApi): Promise<void> {
     `ALTER TABLE users ADD COLUMN deletion_requested_at INTEGER`,
     `ALTER TABLE users ADD COLUMN deletion_due_at INTEGER`,
     `CREATE INDEX IF NOT EXISTS idx_users_deletion_due ON users (deletion_due_at) WHERE deletion_due_at IS NOT NULL`,
+    // v18: tag lookup for GET /api/dramas?tag=. dramas.tags_json stays the source of truth;
+    // drama_tags is an index of it (lower-cased, trimmed), kept in sync by the triggers below
+    // so every write path (create, edit, delete, migrations) updates it.
+    `CREATE TABLE IF NOT EXISTS drama_tags (
+      tag TEXT NOT NULL,
+      drama_id INTEGER NOT NULL,
+      PRIMARY KEY (tag, drama_id)
+    ) WITHOUT ROWID`,
+    `CREATE TRIGGER IF NOT EXISTS trg_dramas_tags_insert AFTER INSERT ON dramas BEGIN
+        INSERT OR IGNORE INTO drama_tags (tag, drama_id)
+        SELECT lower(trim(CAST(j.value AS TEXT))), NEW.drama_id FROM json_each(CASE WHEN json_valid(NEW.tags_json) AND json_type(NEW.tags_json) = 'array' THEN NEW.tags_json ELSE '[]' END) AS j
+        WHERE j.value IS NOT NULL AND trim(CAST(j.value AS TEXT)) <> '';
+      END`,
+    `CREATE TRIGGER IF NOT EXISTS trg_dramas_tags_update AFTER UPDATE OF tags_json ON dramas BEGIN
+        DELETE FROM drama_tags WHERE drama_id = OLD.drama_id;
+        INSERT OR IGNORE INTO drama_tags (tag, drama_id)
+        SELECT lower(trim(CAST(j.value AS TEXT))), NEW.drama_id FROM json_each(CASE WHEN json_valid(NEW.tags_json) AND json_type(NEW.tags_json) = 'array' THEN NEW.tags_json ELSE '[]' END) AS j
+        WHERE j.value IS NOT NULL AND trim(CAST(j.value AS TEXT)) <> '';
+      END`,
+    `CREATE TRIGGER IF NOT EXISTS trg_dramas_tags_delete AFTER DELETE ON dramas BEGIN
+        DELETE FROM drama_tags WHERE drama_id = OLD.drama_id;
+      END`,
+    // Fill it for dramas that already exist.
+    `INSERT OR IGNORE INTO drama_tags (tag, drama_id)
+        SELECT lower(trim(CAST(j.value AS TEXT))), d.drama_id FROM dramas AS d, json_each(CASE WHEN json_valid(d.tags_json) AND json_type(d.tags_json) = 'array' THEN d.tags_json ELSE '[]' END) AS j
+        WHERE j.value IS NOT NULL AND trim(CAST(j.value AS TEXT)) <> ''`,
   ];
 
   for (const sql of statements) {
@@ -736,6 +763,8 @@ function mapDramaCard(row: DramaListRow): DramaCard {
     isPublished: Boolean(row.is_published),
     createdById: row.created_by_id ?? null,
     createdByName: row.created_by_name ?? null,
+    // Same parsing as the detail endpoint. Always an array when the query selected tags_json.
+    ...(row.tags_json !== undefined ? { tags: parseTags(row.tags_json) } : {}),
   };
 }
 
@@ -975,30 +1004,34 @@ export async function updateSystemSettings(updates: Partial<SystemSettings>): Pr
 // PUBLIC DRAMA APIS (Strictly Published Only)
 // ==========================================
 
-export async function listDramas(options?: { cursor?: number; limit?: number; query?: string }) {
+export async function listDramas(options?: { cursor?: number; limit?: number; query?: string; tag?: string }) {
   const db = await getDb();
   const limit = Math.max(1, Math.min(options?.limit ?? 24, 60));
   const cursor = options?.cursor;
   const query = options?.query?.trim();
+  const tag = options?.tag?.trim();
 
-  let sql = `
-    SELECT drama_id, slug, title, cover, play_count, episode_count, latest_episode_label, is_published
-    FROM dramas
-    WHERE is_published = 1
-  `;
-  const params: unknown[] = [];
+  const columns = `d.drama_id, d.slug, d.title, d.cover, d.play_count, d.episode_count, d.latest_episode_label,
+    d.is_published, d.tags_json`;
+  // With ?tag=, walk the drama_tags index (tag, drama_id) newest-first; otherwise the dramas table.
+  let sql = tag
+    ? `SELECT ${columns} FROM drama_tags t JOIN dramas d ON d.drama_id = t.drama_id
+       WHERE t.tag = lower(?) AND d.is_published = 1`
+    : `SELECT ${columns} FROM dramas d WHERE d.is_published = 1`;
+  const params: unknown[] = tag ? [tag] : [];
+  const idCol = tag ? "t.drama_id" : "d.drama_id";
 
   if (query) {
-    sql += ` AND (title LIKE ? OR synopsis LIKE ?)`;
+    sql += ` AND (d.title LIKE ? OR d.synopsis LIKE ?)`;
     params.push(`%${query}%`, `%${query}%`);
   }
 
   if (cursor !== undefined) {
-    sql += ` AND drama_id < ?`;
+    sql += ` AND ${idCol} < ?`;
     params.push(cursor);
   }
 
-  sql += ` ORDER BY drama_id DESC LIMIT ?`;
+  sql += ` ORDER BY ${idCol} DESC LIMIT ?`;
   params.push(limit + 1);
 
   const rows = (await db.all(sql, params as InValue[])) as DramaListRow[];

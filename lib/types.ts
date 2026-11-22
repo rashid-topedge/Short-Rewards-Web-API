@@ -10,6 +10,8 @@ export type DramaCard = {
   /** Admin list only: who created it ("admin" / "mod:<id>"; null for imported dramas). */
   createdById?: string | null;
   createdByName?: string | null;
+  /** The drama's tags (same as GET /api/dramas/:id); [] when it has none. */
+  tags?: string[];
   /** Admin list only: what the signed-in staff member may do with it. */
   permissions?: { canEdit: boolean; canDelete: boolean };
   /** Admin only: a signed link to the cover, for display (the bucket is private). */
