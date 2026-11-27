@@ -2061,15 +2061,15 @@ async function takeDailyRewardSlot(
     [userId, day, kind]
   )) as { count: number; last_at: number } | undefined;
 
-  if (maxPerDay <= 0 || (row && row.count >= maxPerDay)) {
-    return { ok: false, reason: "LIMIT" };
-  }
-  if (row && cooldownSeconds > 0) {
-    const elapsed = (now - row.last_at) / 1000;
-    if (elapsed < cooldownSeconds) {
-      return { ok: false, reason: "COOLDOWN", retryAfterSeconds: Math.ceil(cooldownSeconds - elapsed) };
-    }
-  }
+  // if (maxPerDay <= 0 || (row && row.count >= maxPerDay)) {
+  //  return { ok: false, reason: "LIMIT" };
+  // }
+  // if (row && cooldownSeconds > 0) {
+  //  const elapsed = (now - row.last_at) / 1000;
+  //  if (elapsed < cooldownSeconds) {
+  //    return { ok: false, reason: "COOLDOWN", retryAfterSeconds: Math.ceil(cooldownSeconds - elapsed) };
+  //  }
+  // }
 
   await tx.run(
     `INSERT INTO user_daily_reward_counts (user_id, day, kind, count, last_at)
